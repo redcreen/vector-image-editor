@@ -23,9 +23,10 @@ def main():
             shutil.copy2(source, dest)
     app = target / 'assets/editor'
     app.mkdir(parents=True, exist_ok=True)
-    for name in ('index.html', 'style.css', 'app.js', 'geometry.js', 'interactions.js', 'server.py'):
+    for name in ('index.html', 'style.css', 'app.js', 'geometry.js', 'offset.js', 'interactions.js', 'layers.js', 'tracing.js', 'server.py'):
         shutil.copy2(root / name, app / name)
     shutil.copytree(root / 'examples', app / 'examples', dirs_exist_ok=True)
+    shutil.copytree(root / 'vendor', app / 'vendor', dirs_exist_ok=True)
     print('已安装通用矢量图编辑器 Skill：' + str(target))
 
 

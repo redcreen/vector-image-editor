@@ -2,6 +2,25 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const g=require('../../tools/curve-editor/geometry.js');
 const near=(a,b)=>assert.ok(Math.hypot(a.x-b.x,a.y-b.y)<1e-7,JSON.stringify({a,b}));
+test('two-point calibration converts mm and cm while retaining image coordinates',()=>{
+ const calibration={a:{x:20,y:40},b:{x:80,y:120},length:10,unit:'cm'};
+ const before=JSON.stringify(calibration);
+ assert.equal(g.millimetersPerPixel(calibration),1);
+ assert.deepEqual(g.measureLength(250,calibration,'cm'),{value:25,unit:'cm'});
+ assert.deepEqual(g.measureLength(250,calibration,'mm'),{value:250,unit:'mm'});
+ assert.equal(g.millimetersPerPixel({...calibration,length:20,unit:'mm'}),.2);
+ assert.equal(JSON.stringify(calibration),before);
+});
+test('uncalibrated drawings keep honest pixel measurements',()=>{
+ assert.equal(g.millimetersPerPixel(null),null);
+ assert.deepEqual(g.measureLength(25,null,'cm'),{value:25,unit:'px'});
+ assert.deepEqual(g.measureLength(0,null,'mm'),{value:0,unit:'px'});
+});
+test('invalid calibrations cannot produce a physical measurement',()=>{
+ const c={a:{x:0,y:0},b:{x:100,y:0},length:10,unit:'cm'};
+ for(const bad of [false,{}, {...c,b:c.a},{...c,b:{x:1e-8,y:0}},{...c,length:0},{...c,length:-1},{...c,length:Infinity},{...c,length:true},{...c,length:1e8},{...c,unit:'inch'},{...c,a:{x:NaN,y:0}},{...c,a:{x:1e8,y:0}}])assert.throws(()=>g.millimetersPerPixel(bad),RangeError);
+ assert.throws(()=>g.measureLength(100,c,'inch'),RangeError);
+});
 const close=(a,b,tolerance=1e-6)=>assert.ok(Math.abs(a-b)<tolerance,JSON.stringify({a,b,tolerance}));
 test('new nodes retain the requested type instead of always becoming cusp nodes',()=>{
  for(const mode of ['cusp','smooth','symmetric'])assert.equal(g.node(10,20,mode).mode,mode);
@@ -125,4 +144,79 @@ test('segmentD emits only the requested cubic segment',()=>{
  const path={closed:false,nodes:[a,b]};
  assert.equal(g.segmentD(path,0),'M 0 0 C 3 4 7 8 10 20');
  assert.equal(g.segmentD(path,1),'');
+});
+
+test('normalizeRect accepts opposite drag directions and includes its boundary',()=>{
+ assert.deepEqual(g.normalizeRect({x:12,y:-4},{x:-8,y:16}),{x:-8,y:-4,width:20,height:20});
+});
+
+test('pathBounds handles empty and point-only paths',()=>{
+ assert.equal(g.pathBounds({closed:false,nodes:[]}),null);
+ assert.deepEqual(g.pathBounds({closed:false,nodes:[g.node(-7,11)]}),{x:-7,y:11,width:0,height:0});
+});
+
+test('pathBounds uses cubic extrema instead of control-point bounds',()=>{
+ const a=g.node(0,0),b=g.node(100,0);a.out={x:0,y:100};b.in={x:100,y:100};
+ assert.deepEqual(g.pathBounds({closed:false,nodes:[a,b]}),{x:0,y:0,width:100,height:75});
+ const c=g.node(0,0),d=g.node(100,0);c.out={x:-1000,y:0};d.in={x:1100,y:0};
+ const bounds=g.pathBounds({closed:false,nodes:[c,d]});
+ assert.ok(bounds.x>-1000&&bounds.x<0,bounds.x);assert.ok(bounds.x+bounds.width<1100&&bounds.x+bounds.width>100);
+});
+
+test('pathBounds includes the closing cubic segment',()=>{
+ const a=g.node(0,0),b=g.node(100,0);b.out={x:100,y:-200};a.in={x:0,y:-200};
+ assert.deepEqual(g.pathBounds({closed:false,nodes:[a,b]}),{x:0,y:0,width:100,height:0});
+ assert.deepEqual(g.pathBounds({closed:true,nodes:[a,b]}),{x:0,y:-150,width:100,height:150});
+});
+
+test('contentBounds preserves the image extent and pads only overflowing curve edges',()=>{
+ const inside={width:300,height:200,paths:[{nodes:[g.node(20,30),g.node(80,90)],closed:false}]};
+ assert.deepEqual(g.contentBounds(inside),{x:0,y:0,width:300,height:200});
+ const left=g.node(-20,50),far=g.node(340,250);
+ assert.deepEqual(g.contentBounds({width:300,height:200,paths:[{nodes:[left,far],closed:false}]}),{x:-24,y:0,width:368,height:254});
+ const source={id:'far',closed:false,nodes:[g.node(325,20),g.node(350,40)]};
+ const mirrored=g.reflectPath(source,{x:0,y:0},{x:0,y:100});
+ assert.deepEqual(g.contentBounds({width:300,height:200,paths:[mirrored]}),{x:-354,y:0,width:654,height:200});
+ assert.deepEqual(g.contentBounds({paths:[]}),{x:0,y:0,width:1000,height:700});
+});
+
+test('pathsInRect selects curve crossings and rejects bounding-box-only near misses',()=>{
+ const a=g.node(0,0),b=g.node(100,0);a.out={x:0,y:100};b.in={x:100,y:100};
+ const arch={id:'arch',closed:false,nodes:[a,b]};
+ const negative={id:'negative',closed:false,nodes:[g.node(-20,-20),g.node(-10,-10)]};
+ const point={id:'point',closed:false,nodes:[g.node(50,10)]};
+ const paths=[arch,negative,point];
+ assert.deepEqual(g.pathsInRect(paths,{x:45,y:70,width:10,height:10}),['arch']);
+ assert.deepEqual(g.pathsInRect(paths,{x:45,y:5,width:10,height:10}),['point']);
+ assert.deepEqual(g.pathsInRect(paths,{x:-20,y:-20,width:0,height:0}),['negative']);
+});
+
+test('pathsInRect checks the final segment of a closed path',()=>{
+ const a=g.node(0,0),b=g.node(100,0);b.out={x:100,y:-100};a.in={x:0,y:-100};
+ const path={id:'closed',closed:true,nodes:[a,b]};
+ assert.deepEqual(g.pathsInRect([path],{x:45,y:-80,width:10,height:10}),['closed']);
+});
+
+test('pathsInRect follows collinear cubic overshoot instead of collapsing to its endpoint chord',()=>{
+ const a=g.node(0,0),b=g.node(10,0);a.out={x:100,y:0};b.in={x:100,y:0};
+ const path={id:'overshoot',closed:false,nodes:[a,b]};
+ assert.ok(g.pathBounds(path).x+g.pathBounds(path).width>76);
+ assert.deepEqual(g.pathsInRect([path],{x:60,y:-5,width:15,height:10}),['overshoot']);
+});
+
+test('pathsInRect follows collinear backtracking on a closed final segment',()=>{
+ const a=g.node(0,0),b=g.node(10,0);b.out={x:100,y:0};a.in={x:100,y:0};
+ const path={id:'closed-overshoot',closed:true,nodes:[a,b]};
+ assert.deepEqual(g.pathsInRect([path],{x:60,y:-5,width:15,height:10}),['closed-overshoot']);
+});
+
+test('pathsInRect subdivides a zero-chord cubic loop',()=>{
+ const a=g.node(0,0),b=g.node(0,0);a.out={x:100,y:0};b.in={x:100,y:0};
+ const path={id:'zero-chord',closed:false,nodes:[a,b]};
+ assert.deepEqual(g.pathsInRect([path],{x:65,y:-5,width:10,height:10}),['zero-chord']);
+});
+
+test('nodesInRect returns anchors in path order for normalized rectangles',()=>{
+ const paths=[{id:'a',nodes:[g.node(-5,0),g.node(5,5)]},{id:'b',nodes:[g.node(10,10)]}];
+ assert.deepEqual(g.nodesInRect(paths,{x:6,y:6,width:-12,height:-12}),[{pathId:'a',index:0},{pathId:'a',index:1}]);
 });
