@@ -1,0 +1,15 @@
+# Local artwork, saved sessions, and service records
+/work/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local environment and operating system files
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log

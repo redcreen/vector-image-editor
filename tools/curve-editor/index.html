@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>通用矢量图编辑器 · 本机曲线编辑</title><link rel="stylesheet" href="style.css"><link rel="icon" href="data:,"></head>
+<body>
+<header><div class="brand">通用矢量图编辑器 <span>本机工作台</span></div><div class="files">
+<button id="new">新建</button><button id="import">导入底图</button><button id="open">打开修改</button><button id="save" class="primary">保存给 AI</button><button id="export">导出 SVG</button>
+</div><input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><input id="project-file" type="file" accept="application/json,.json" hidden></header>
+<div class="actionbar"><div class="group"><button id="undo" title="⌘ / Ctrl + Z">撤销</button><button id="redo" title="⌘ / Ctrl + Shift + Z">重做</button></div><div class="group"><button id="finish">结束画线</button><button id="close-path">闭合曲线</button><button id="delete-node">删除节点</button></div><div class="zoom"><button id="zoom-out" aria-label="缩小">−</button><output id="zoom">100%</output><button id="zoom-in" aria-label="放大">＋</button><button id="fit">适合窗口</button></div></div>
+<main><nav class="tools" aria-label="绘图工具">
+<button data-tool="select" title="V"><b>↖</b>选取<span>V</span></button>
+<button data-tool="node" title="F10"><b>◇</b>节点<span>F10</span></button>
+<button data-tool="pen" title="B"><b>✒</b>贝塞尔<span>B</span></button>
+<button data-tool="axis" title="A"><b>⤢</b>对称轴<span>A</span></button>
+<button data-tool="measure" title="M"><b>↔</b>测量<span>M</span></button>
+<button data-tool="pan" title="H"><b>✥</b>平移<span>H</span></button>
+</nav>
+<section class="workspace" aria-label="曲线画板">
+<div id="canvas-label">练习画板</div>
+<svg id="canvas" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="可拖拽的曲线与节点画板"><defs><pattern id="grid" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M 25 0 L 0 0 0 25" fill="none" stroke="#e5e9ee" stroke-width="0.6"/></pattern></defs><g id="viewport"><rect id="paper" fill="white"/><rect id="grid-paper" fill="url(#grid)"/><image id="reference" preserveAspectRatio="none"/><g id="ghosts"></g><g id="paths"></g><g id="guides" pointer-events="none"></g><g id="handles"></g><g id="measure-overlay" pointer-events="none"></g></g></svg>
+<div id="canvas-hint">拖动蓝色方点改形状，拖动圆点改弧度</div>
+</section>
+<aside>
+<section><h2>曲线</h2><div id="curve-list" class="curve-list"></div><button id="add-path" class="wide">＋ 新画一条</button></section>
+<section><h2>镜像 <span>保留原曲线</span></h2><p id="axis-info" class="mode-hint">尚未设置对称轴</p><div class="fields"><button id="draw-axis">画对称轴</button><button id="clear-axis">清除轴</button></div><button id="mirror-copy" class="wide spaced">生成镜像副本</button></section>
+<section id="measurement-panel"><h2>测量 <span>px · 未标定毫米</span></h2><div class="measure-modes"><button data-measure="points">点距测量</button><button data-measure="segments">选段测量</button></div><p id="measure-summary" class="mode-hint">连续点击测点，或右键曲线测量弧长</p><output id="measure-total" aria-live="polite">0.00 px</output><ol id="measure-details"></ol><div class="fields"><button id="measure-finish">结束测量</button><button id="measure-clear">清除测量</button></div><button id="measure-alternate" class="wide spaced" hidden>切换闭合曲线另一侧</button><p class="mode-hint spaced">选段：点首段，Shift 点末段；按节点顺序连续选择。测量标记不保存、不导出。</p></section>
+<section id="properties"><h2>当前曲线</h2><label>名称<input id="path-name" maxlength="80"></label><div class="fields"><label>用途<select id="path-role"><option value="outline">外形建议</option><option value="seam">车缝线</option><option value="cut">切割线</option><option value="note">辅助标记</option></select></label><label>线色<input id="path-color" type="color" value="#e04544"></label></div><label>修改说明<textarea id="path-note" rows="2" placeholder="例如：两端不动，中间收进一点"></textarea></label><button id="delete-path" class="quiet-danger">删除这条曲线</button></section>
+<section><h2>节点 <span id="node-id">未选择</span></h2><div class="node-modes"><button data-mode="cusp">尖角</button><button data-mode="smooth">平滑</button><button data-mode="symmetric">对称</button></div><p id="node-mode-hint" class="mode-hint">新节点沿用：尖角</p><div class="fields"><label>X<input id="node-x" type="number" step="0.1"></label><label>Y<input id="node-y" type="number" step="0.1"></label></div><button id="straight" class="wide">收起手柄 · 直线节点</button></section>
+<section><h2>底图 <span>已锁定</span></h2><label class="range-label">透明度 <output id="opacity-value">65%</output><input id="opacity" type="range" min="0" max="100" value="65"></label><label class="check"><input id="show-grid" type="checkbox" checked>显示网格</label><label class="check"><input id="show-original" type="checkbox" checked>显示修改前曲线</label></section>
+<details><summary>怎么画、怎么改</summary><p>贝塞尔：单击画直线节点，按住拖动拉出弧线手柄。点回起点可闭合；Enter 或 Esc 结束。</p><p>节点或选取：双击曲线加节点。拖方点改位置，拖圆柄改弧度；Delete 删除节点，Alt 拖手柄可单独调整一边。</p><p>右键：曲线上可加点、测量或镜像；节点上可删除或调整类型；空白处可续接当前未闭合曲线，或从这里新画一条。</p><p>对称轴：两次点击画轴，Shift 约束角度；再选曲线生成镜像副本。原曲线保留，可撤销。</p><p>测量：连续点击测点，Enter / Esc 结束，Backspace 回退。选段测量时点首段、Shift 点末段。曲线测量为弧长，单位 px。</p><p>选取：拖动整条曲线。滚轮缩放；按住空格拖动画板。方向键微调节点，Shift 加大步长。</p><p>保存给 AI 后，回聊天说“按最新保存的曲线改”。保存不自动发送聊天，也不修改原纸版。</p></details>
+</aside></main>
+<footer><span id="status" role="status" aria-live="polite">可直接拖动示例曲线，或导入自己的底图</span><span id="coordinates">图像坐标 px · 未标定毫米</span></footer>
+<div id="context-menu" class="context-menu" role="menu" aria-label="画板右键菜单" hidden></div>
+<script src="geometry.js"></script><script src="interactions.js"></script><script src="app.js"></script>
+</body></html>

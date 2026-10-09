@@ -1,0 +1,6 @@
+interface:
+  display_name: "通用矢量图编辑器"
+  short_description: "在任意本机项目中拖动曲线节点、参考图片描线，并读取保存的修改"
+  default_prompt: "使用 $vector-editor 在当前项目打开通用矢量图编辑器，让我拖动节点修改曲线。"
+policy:
+  allow_implicit_invocation: true
