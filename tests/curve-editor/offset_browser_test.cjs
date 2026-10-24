@@ -7,6 +7,8 @@ const path=require('node:path');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
 const G=require('../../tools/curve-editor/geometry.js');
+const {expandLayerContents}=require('./layer_tree_helpers.cjs');
+const {fixtureOptions}=require('./fixture_helpers.cjs');
 const curve=(id,points,closed=false)=>({id,name:id,color:'#176bce',role:'cut',note:'保留来源说明',dashed:true,closed,nodes:points.map(([x,y])=>G.node(x,y))});
 const square=()=>curve('square',[[100,100],[300,100],[300,300],[100,300]],true);
 const calibration={a:{x:0,y:0},b:{x:100,y:0},length:50,unit:'mm'};
@@ -14,34 +16,94 @@ async function setup(t,paths=[square()],extra={}){
  const project=await mkdtemp(path.join(tmpdir(),'curve-editor-offset-'));let server,browser;
  t.after(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(project,{recursive:true,force:true});});
  const initial={format:'daban-curve-editor',version:1,units:'image-px',width:800,height:550,title:'偏移测试',paths,originals:[],images:[],layers:[{id:'curves',name:'曲线图层',visible:true,locked:false,pathIds:paths.map(p=>p.id),imageIds:[]}],image:null,opacity:.65,newNodeMode:'cusp',calibration,measureUnit:'mm',...extra};
- const saves=path.join(project,'work/curve_editor/sessions');await mkdir(saves,{recursive:true});await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
- server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','auto']);
+ const saves=path.join(project,'work/curve_editor/test-sessions');await mkdir(saves,{recursive:true});await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
+ server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const match=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const page=await browser.newPage({viewport:{width:1440,height:960}}),errors=[],network=[];page.on('pageerror',e=>errors.push(e.message));page.on('requestfailed',r=>network.push({url:r.url(),error:r.failure()?.errorText}));page.on('dialog',d=>d.accept());
  page.on('response',r=>{if(r.status()>=400)network.push({url:r.url(),status:r.status()});});
- await page.goto(url);
- try{await page.locator('#curve-list button span').filter({hasText:new RegExp('^'+paths[0].name+'$')}).waitFor({state:'attached',timeout:10000});}
- catch(error){console.error('Offset fixture startup:',await page.locator('#status').textContent(),await page.locator('#curve-list').textContent(),errors,network);throw error;}
+ await page.goto(url);await expandLayerContents(page);
+ try{await page.locator('#layer-list .layer-contents .curve-select span').filter({hasText:new RegExp('^'+paths[0].name+'$')}).waitFor({state:'attached',timeout:10000});}
+ catch(error){console.error('Offset fixture startup:',await page.locator('#status').textContent(),await page.locator('#layer-list').textContent(),errors,network);throw error;}
  const panel=page.locator('[data-panel="curves"]');if(!await panel.evaluate(el=>el.open))await panel.locator('summary').click();
- const item=id=>page.locator('#curve-list button').filter({has:page.locator('span',{hasText:new RegExp('^'+id+'$')})});
+ const item=id=>page.locator('#layer-list .layer-contents .curve-select').filter({has:page.locator('span',{hasText:new RegExp('^'+id+'$')})});
  const save=async()=>{const response=page.waitForResponse(r=>r.url().endsWith('/api/save'));await page.locator('#save').click();assert.equal((await response).status(),200);return page.evaluate(()=>fetch('/api/latest').then(r=>r.json()));};
- const selected=()=>page.locator('#curve-list button[aria-pressed=true] span').allTextContents();
+ const selected=()=>page.locator('#layer-list .layer-contents .curve-select[aria-pressed=true] span').allTextContents();
  const open=async id=>{await item(id).click({button:'right'});await page.getByRole('menuitem',{name:'偏移曲线…',exact:true}).click({timeout:3000});await page.locator('#offset-dialog').waitFor();};
- const ready=()=>page.locator('#offset-info').filter({hasText:/将生成/}).waitFor();
+ const ready=()=>page.locator('#offset-info').filter({hasText:/将生成/}).waitFor({timeout:5000});
  const rightPoint=async(x,y)=>{const p=await page.locator('#viewport').evaluate((el,p)=>{const s=new DOMPoint(p.x,p.y).matrixTransform(el.getScreenCTM());return {x:s.x,y:s.y};},{x,y});await page.mouse.click(p.x,p.y,{button:'right'});};
  return {page,initial,errors,item,save,selected,open,ready,rightPoint};
 }
 const close=(a,b)=>assert.ok(Math.abs(a-b)<.02,`${a} != ${b}`);
+test('26-node head outline retains its node budget through offset preview, creation and undo',fixtureOptions('offset-head-outline.json'),async t=>{
+ const headOutline=require('./fixtures/offset-head-outline.json');
+ const original={...curve('head',[]),...headOutline.path};
+ const {page,initial,save,open,ready,errors}=await setup(t,[original],{calibration:headOutline.calibration});
+ await open(headOutline.path.name);await page.locator('#offset-distance').fill('5');await ready();
+ assert.match(await page.locator('#offset-info').textContent(),/节点 26 → 26/);
+ await page.locator('#offset-apply').click();const saved=await save();
+ assert.equal(saved.paths.length,2);assert.deepEqual(saved.paths[0],initial.paths[0]);assert.equal(saved.paths[1].nodes.length,26);
+ await page.locator('#undo').click();assert.deepEqual((await save()).paths,initial.paths);
+ await page.locator('#redo').click();assert.deepEqual((await save()).paths,saved.paths);
+ await page.reload();await expandLayerContents(page);assert.deepEqual((await save()).paths,saved.paths);assert.deepEqual(errors,[]);
+});
+test('physical precision comparison previews alternatives and applies only the chosen result',fixtureOptions('offset-head-outline.json'),async t=>{
+ const headOutline=require('./fixtures/offset-head-outline.json');
+ const original={...curve('head',[]),...headOutline.path};
+ const {page,initial,save,open,ready,errors}=await setup(t,[original],{calibration:headOutline.calibration});
+ await open(original.name);await ready();
+ const initialPreview=await page.locator('[data-offset-preview]').getAttribute('d');
+ await page.locator('#offset-compare').click();
+ const comparisonsReady=()=>page.waitForFunction(()=>document.querySelectorAll('#offset-comparison tbody tr[data-state="ready"]').length===5,{},{timeout:15000});
+ await comparisonsReady();
+ const row=p=>page.locator(`#offset-comparison tr[data-precision="${p}"]`);
+ assert.equal(await page.locator('#offset-comparison input[data-overlay-precision]').count(),5);
+ assert.equal(await row('auto').locator('td').nth(1).textContent(),'26');
+ assert.equal(await row('0.01').locator('td').nth(1).textContent(),'29');
+ assert.equal(await row('0.02').locator('td').nth(1).textContent(),'26');
+ assert.equal(await page.locator('[data-offset-comparison]').count(),4);
+ const overlayColor=await page.locator('[data-offset-comparison="0.02"]').getAttribute('stroke');
+ await row('0.01').getByRole('button',{name:'设为主方案',exact:true}).click();await ready();
+ assert.equal(await page.locator('#offset-precision').inputValue(),'0.01');
+ assert.match(await page.locator('#offset-info').textContent(),/节点 26 → 29/);
+ assert.notEqual(await page.locator('[data-offset-preview]').getAttribute('d'),initialPreview);
+ assert.equal(await page.locator('[data-offset-comparison="0.02"]').getAttribute('stroke'),overlayColor);
+ assert.equal(await page.locator('#paths .svg-curve').count(),1);assert.equal(await page.locator('#undo').isDisabled(),true);
+ await row('0.02').locator('input[data-overlay-precision]').uncheck();assert.equal(await page.locator('[data-offset-comparison="0.02"]').count(),0);
+ assert.equal(await page.locator('[data-offset-comparison]').count(),3);assert.match(await page.locator('#offset-info').textContent(),/节点 26 → 29/);
+ assert.equal(await row('0.01').locator('input[data-overlay-precision]').isChecked(),true);assert.equal(await row('0.01').locator('input[data-overlay-precision]').isDisabled(),true);
+ assert.equal(await page.locator('#offset-overlay').evaluate(el=>el.indeterminate),true);
+ await page.locator('#offset-overlay').check();assert.equal(await page.locator('[data-offset-comparison]').count(),4);
+ await page.locator('#offset-overlay').uncheck();assert.equal(await page.locator('[data-offset-comparison]').count(),0);
+ await row('0.02').locator('input[data-overlay-precision]').check();assert.equal(await page.locator('[data-offset-comparison]').count(),1);
+ await page.locator('#offset-overlay').check();assert.equal(await page.locator('[data-offset-comparison]').count(),4);
+ await page.locator('#offset-compare').click();assert.equal(await page.locator('[data-offset-comparison]').count(),0);
+ await page.locator('#offset-compare').click();await comparisonsReady();
+ await page.locator('#offset-unit').selectOption('cm');await page.locator('#offset-distance').fill('.5');await ready();await comparisonsReady();
+ assert.match(await page.locator('#offset-info').textContent(),/0.5 cm/);assert.equal(await row('0.01').locator('td').nth(1).textContent(),'29');
+ await page.locator('#offset-cancel').click();assert.equal(await page.locator('#offset-preview path').count(),0);assert.deepEqual((await save()).paths,initial.paths);
+ await open(original.name);await ready();await page.locator('#offset-apply').click();const result=await save();
+ assert.equal(result.paths.length,2);assert.equal(result.paths[1].nodes.length,29);assert.deepEqual(result.paths[0],initial.paths[0]);assert.match(result.paths[1].note,/允许偏差上限：0.01 mm/);
+ await page.locator('#undo').click();assert.deepEqual((await save()).paths,initial.paths);assert.deepEqual(errors,[]);
+});
 test('canvas right-click previews calibrated mm/cm offset, creates independent editable curves and restores in one undo',async t=>{
  const {page,initial,errors,item,save,selected,ready,rightPoint}=await setup(t);
  await item('square').click();await rightPoint(200,100);await page.getByRole('menuitem',{name:'偏移曲线…',exact:true}).click({timeout:3000});
  await page.locator('#offset-distance').fill('5');await ready();
+ assert.match(await page.locator('#offset-info').textContent(),/节点 4 → 4/);
  assert.equal(await page.locator('#offset-closed-settings').isVisible(),true);assert.equal(await page.locator('#offset-open-settings').isVisible(),false);
  assert.equal(await page.locator('#offset-preview path[data-offset-preview]').count(),1);
  assert.equal(await page.locator('#paths .svg-curve').count(),1);assert.equal(await page.locator('#undo').isDisabled(),true);
  if(process.env.CURVE_EDITOR_OFFSET_SCREENSHOT)await page.screenshot({path:process.env.CURVE_EDITOR_OFFSET_SCREENSHOT,fullPage:true});
  const d=await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d');
+ await page.locator('#offset-distance').fill('-5');await ready();
+ assert.match(await page.locator('#offset-info').textContent(),/内收/);
+ const inset=await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d');assert.notEqual(inset,d);
+ const insetBox=await page.locator('#offset-preview path[data-offset-preview]').evaluate(el=>{const b=el.getBBox();return {x:b.x,y:b.y,width:b.width,height:b.height};});
+ close(insetBox.x,110);close(insetBox.y,110);close(insetBox.width,180);close(insetBox.height,180);
+ await page.locator('#offset-unit').selectOption('cm');await page.locator('#offset-distance').fill('-.5');await ready();
+ assert.equal(await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d'),inset);
+ assert.equal(await page.locator('#offset-closed-direction').count(),0);assert.equal(await page.locator('#offset-open-side').count(),0);
  await page.locator('#offset-unit').selectOption('cm');await page.locator('#offset-distance').fill('.5');await ready();
  assert.equal(await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d'),d);
  await page.locator('#offset-cancel').click();assert.equal(await page.locator('#offset-preview path').count(),0);assert.deepEqual((await save()).paths,initial.paths);
@@ -52,7 +114,7 @@ test('canvas right-click previews calibrated mm/cm offset, creates independent e
  assert.deepEqual(await selected(),[generated.name]);assert.match(await page.locator('#history-list').textContent(),/偏移曲线/);
  await page.locator('#undo').click();assert.deepEqual((await save()).paths,initial.paths);assert.deepEqual(await selected(),['square']);assert.equal(await page.locator('#undo').isDisabled(),true);
  await page.locator('#redo').click();assert.deepEqual((await save()).paths,result.paths);
- await page.reload();await page.locator('#curve-list button').filter({hasText:generated.name}).waitFor({state:'attached'});assert.deepEqual((await save()).paths,result.paths);
+ await page.reload();await expandLayerContents(page);await page.locator('#layer-list .layer-contents .curve-select').filter({hasText:generated.name}).waitFor({state:'attached'});assert.deepEqual((await save()).paths,result.paths);
  // New curves are ordinary editable nodes, not a static outline overlay.
  await page.locator('#handles .anchor').first().click();await page.keyboard.press('ArrowRight');const edited=(await save()).paths[1];close(edited.nodes[0].x,generated.nodes[0].x+1);
  await page.locator('#undo').click();assert.deepEqual((await save()).paths,result.paths);assert.deepEqual(errors,[]);
@@ -63,26 +125,31 @@ test('selected reversed pieces assemble into one closed contour across layers, w
  const layers=[{id:'base',name:'底层',visible:true,locked:false,pathIds:['piece-a','piece-c','other'],imageIds:[]},{id:'active',name:'上层',visible:true,locked:false,pathIds:['piece-b','piece-d'],imageIds:[]}];
  const {page,initial,errors,item,save,ready}=await setup(t,[a,b,c,d,other],{layers});
  await item('piece-a').click();for(const id of ['piece-b','piece-c','piece-d','other'])await item(id).click({modifiers:['Shift']});
- await item('piece-a').click({button:'right'});assert.equal(await page.locator('#curve-list button[aria-pressed=true]').count(),5);
+ await item('piece-a').click({button:'right'});assert.equal(await page.locator('#layer-list .layer-contents .curve-select[aria-pressed=true]').count(),5);
  await page.getByRole('menuitem',{name:'偏移曲线…',exact:true}).click();await page.locator('#offset-distance').fill('5');await ready();
  assert.equal(await page.locator('#offset-open-settings').isVisible(),false);assert.equal(await page.locator('#offset-preview path[data-offset-preview]').count(),2);
  await page.locator('#offset-apply').click();const result=await save();assert.equal(result.paths.length,7);assert.deepEqual(result.paths.slice(0,5),initial.paths);
- assert.ok(result.paths.slice(5).every(p=>p.closed));assert.equal(await page.locator('#curve-list button[aria-pressed=true]').count(),2);
+ assert.ok(result.paths.slice(5).every(p=>p.closed));assert.equal(await page.locator('#layer-list .layer-contents .curve-select[aria-pressed=true]').count(),2);
  const boxes=result.paths.slice(5).map(G.pathBounds).sort((a,b)=>a.x-b.x);close(boxes[0].x,90);close(boxes[0].width,220);close(boxes[1].x,490);close(boxes[1].width,170);
  for(const p of result.paths.slice(5))assert.equal(result.layers.filter(l=>l.pathIds.includes(p.id)).length,1);
- await page.locator('#undo').click();const undone=await save();assert.deepEqual(undone.paths,initial.paths);assert.deepEqual(undone.layers,layers);assert.equal(await page.locator('#curve-list button[aria-pressed=true]').count(),5);assert.deepEqual(errors,[]);
+ await page.locator('#undo').click();const undone=await save();assert.deepEqual(undone.paths,initial.paths);assert.deepEqual(undone.layers,layers.map(l=>({...l,textIds:[]})));assert.equal(await page.locator('#layer-list .layer-contents .curve-select[aria-pressed=true]').count(),5);assert.deepEqual(errors,[]);
 });
-test('open curves show direction arrows and left/right options, retaining open ends and source',async t=>{
+test('open curves use signed distance and direction arrows, retaining open ends and source',async t=>{
  const original=curve('open',[[100,300],[400,300]]);
  const {page,initial,errors,save,open,ready}=await setup(t,[original]);await open('open');
  assert.equal(await page.locator('#offset-open-settings').isVisible(),true);assert.equal(await page.locator('#offset-closed-settings').isVisible(),false);
  await page.locator('#offset-distance').fill('1');await page.locator('#offset-unit').selectOption('cm');await ready();
  assert.ok(await page.locator('#offset-preview [data-offset-direction]').count()>0);
- const left=await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d');await page.locator('#offset-open-side').selectOption('right');await ready();
+ const left=await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d');await page.locator('#offset-distance').fill('-1');await ready();
  assert.notEqual(await page.locator('#offset-preview path[data-offset-preview]').getAttribute('d'),left);
  await page.locator('#offset-apply').click();const result=await save();assert.deepEqual(result.paths[0],initial.paths[0]);assert.equal(result.paths[1].closed,false);
  const b=G.pathBounds(result.paths[1]);close(b.x,100);close(b.y,320);close(b.width,300);close(b.height,0);
- await page.locator('#undo').click();await open('open');await page.locator('#offset-distance').fill('0');await page.locator('#offset-info').filter({hasText:/大于 0/}).waitFor();assert.equal(await page.locator('#offset-apply').isDisabled(),true);assert.equal(await page.locator('#offset-preview path[data-offset-preview]').count(),0);
+ assert.match(result.paths[1].name,/右偏 1 cm/);assert.match(result.paths[1].note,/右偏 1 cm/);
+ await page.locator('#undo').click();await open('open');
+ for(const invalid of ['0','','10000001','-10000001']){
+  await page.locator('#offset-distance').fill(invalid);await page.locator('#offset-info[data-state="error"]').waitFor();
+  assert.match(await page.locator('#offset-info').textContent(),/非零|不超过/);assert.equal(await page.locator('#offset-apply').isDisabled(),true);assert.equal(await page.locator('#offset-preview path[data-offset-preview]').count(),0);
+ }
  await page.locator('#offset-distance').fill('8');await ready();await page.keyboard.press('Escape');assert.equal(await page.locator('#offset-dialog').isVisible(),false);assert.equal(await page.locator('#offset-preview path').count(),0);assert.equal(await page.locator('#redo').isEnabled(),true);assert.deepEqual((await save()).paths,initial.paths);assert.deepEqual(errors,[]);
 });
 test('missing calibration and excessive inset block generation, and dialog shortcuts never edit underlying curves',async t=>{
@@ -94,19 +161,22 @@ test('missing calibration and excessive inset block generation, and dialog short
 test('inset validation, mixed selection, dialog keys and refresh preserve draft history',async t=>{
  const openPath=curve('open',[[450,350],[650,350]]);
  const {page,initial,errors,item,save,open,ready}=await setup(t,[square(),openPath]);await open('square');
- await page.locator('#offset-closed-direction').selectOption('inward');await page.locator('#offset-distance').fill('60');await page.locator('#offset-info').filter({hasText:/内收|消失|有效/}).waitFor();assert.equal(await page.locator('#offset-apply').isDisabled(),true);
- await page.locator('#offset-distance').fill('5');await ready();await page.locator('#offset-apply').click();const result=await save();const b=G.pathBounds(result.paths[2]);close(b.x,110);close(b.width,180);
+ await page.locator('#offset-distance').fill('-60');await page.locator('#offset-info').filter({hasText:/内收|消失|有效/}).waitFor();assert.equal(await page.locator('#offset-apply').isDisabled(),true);
+ await page.locator('#offset-distance').fill('-5');await ready();await page.locator('#offset-apply').click();const result=await save();const b=G.pathBounds(result.paths[2]);close(b.x,110);close(b.width,180);assert.match(result.paths[2].name,/内收 5 mm/);
  await page.locator('#undo').click();assert.equal(await page.locator('#redo').isEnabled(),true);
  await item('square').click();await item('open').click({modifiers:['Shift']});await open('square');await ready();assert.equal(await page.locator('#offset-closed-settings').isVisible(),true);assert.equal(await page.locator('#offset-open-settings').isVisible(),true);
+ const previewBoxes=()=>page.locator('#offset-preview path[data-offset-preview]').evaluateAll(paths=>paths.map(el=>{const b=el.getBBox();return {x:b.x,y:b.y,width:b.width};}));
+ const negative=await previewBoxes();close(negative[0].x,110);close(negative[0].width,180);close(negative[1].y,360);
+ await page.locator('#offset-distance').fill('5');await ready();const positive=await previewBoxes();close(positive[0].x,90);close(positive[0].width,220);close(positive[1].y,340);
  await page.locator('#offset-distance').focus();await page.keyboard.press('ArrowRight');await page.keyboard.press('Delete');await page.keyboard.press('ControlOrMeta+z');await page.keyboard.press('Escape');
  assert.equal(await page.locator('#redo').isEnabled(),true);assert.deepEqual((await save()).paths,initial.paths);
- await open('square');await page.locator('#offset-distance').fill('5');await ready();await page.reload();await item('square').waitFor();assert.equal(await page.locator('#offset-dialog').isVisible(),false);assert.equal(await page.locator('#offset-preview path').count(),0);assert.deepEqual((await save()).paths,initial.paths);assert.equal(await page.locator('#redo').isEnabled(),true);assert.deepEqual(errors,[]);
+ await open('square');await page.locator('#offset-distance').fill('5');await ready();await page.reload();await expandLayerContents(page);await item('square').waitFor();assert.equal(await page.locator('#offset-dialog').isVisible(),false);assert.equal(await page.locator('#offset-preview path').count(),0);assert.deepEqual((await save()).paths,initial.paths);assert.equal(await page.locator('#redo').isEnabled(),true);assert.deepEqual(errors,[]);
 });
 test('thin inset stays closed when saving and importing its JSON',async t=>{
  const thin=curve('thin',[[100,100],[150,102],[200,100]],true);
  const {page,errors,save,open,ready}=await setup(t,[thin],{calibration:{...calibration,length:100}});
- await open('thin');await page.locator('#offset-closed-direction').selectOption('inward');await page.locator('#offset-distance').fill('.98');await ready();await page.locator('#offset-apply').click();
+ await open('thin');await page.locator('#offset-distance').fill('-.98');await ready();await page.locator('#offset-apply').click();
  const result=await save();assert.equal(result.paths[1].closed,true);assert.ok(result.paths[1].nodes.length>=3);
- await page.locator('#project-file').setInputFiles({name:'offset-roundtrip.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(result))});await page.locator('#status').filter({hasText:/已打开/}).waitFor();
+ await page.locator('#project-file').setInputFiles({name:'offset-roundtrip.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(result))});await page.locator('#status').filter({hasText:/已打开/}).waitFor();await expandLayerContents(page);
  assert.deepEqual((await save()).paths,result.paths);assert.equal(await page.locator('#offset-preview path').count(),0);assert.deepEqual(errors,[]);
 });

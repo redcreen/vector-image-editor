@@ -6,6 +6,7 @@ const {tmpdir}=require('node:os');
 const path=require('node:path');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
+const {expandLayerContents}=require('./layer_tree_helpers.cjs');
 const G=require('../../tools/curve-editor/geometry.js');
 const PNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1cAAAAASUVORK5CYII=';
 
@@ -13,13 +14,13 @@ async function setup(t){
  const project=await mkdtemp(path.join(tmpdir(),'curve-editor-clipboard-'));let server,browser;
  t.after(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(project,{recursive:true,force:true});});
  const initial={format:'daban-curve-editor',version:1,units:'image-px',title:'图片粘贴测试',width:1000,height:700,paths:[{id:'curve',name:'保留曲线',color:'#e04544',role:'outline',closed:false,note:'',nodes:[G.node(100,100),G.node(200,200)]}],originals:[],image:null,opacity:.65,calibration:{a:{x:0,y:0},b:{x:100,y:0},length:10,unit:'cm'},measureUnit:'cm'};
- const saves=path.join(project,'work/curve_editor/sessions');await mkdir(saves,{recursive:true});await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
- server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','auto']);
+ const saves=path.join(project,'work/curve_editor/test-sessions');await mkdir(saves,{recursive:true});await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
+ server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const m=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(m){clearTimeout(timer);resolve(m[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const context=await browser.newContext({viewport:{width:1440,height:1000},permissions:['clipboard-read','clipboard-write']});
  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',()=>assert.fail('paste must preserve unsaved artwork'));
- await page.goto(url);await page.locator('#curve-list button').filter({hasText:'保留曲线'}).waitFor({state:'attached'});
+ await page.goto(url);await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'保留曲线'}).waitFor({state:'attached'});
  for(const id of ['panel-properties','panel-curves'])await page.locator('#'+id).evaluate(el=>el.open=true);
  const save=async()=>{const response=page.waitForResponse(r=>r.url().endsWith('/api/save'));await page.locator('#save').click();assert.equal((await response).status(),200);return page.evaluate(()=>fetch('/api/latest').then(r=>r.json()));};
  // Simulate clipboard shapes that differ between applications; normal OS paste is tested below.
@@ -41,9 +42,10 @@ test('a real screenshot clipboard pastes into a new selected layer, preserves ar
  await page.locator('[data-tool="select"]').click();
  const canvas=await page.locator('#canvas').boundingBox();await page.mouse.click(canvas.x+canvas.width*.75,canvas.y+canvas.height*.75);
  await page.evaluate(async()=>{const canvas=document.createElement('canvas');canvas.width=80;canvas.height=60;const c=canvas.getContext('2d');c.fillStyle='#176bce';c.fillRect(0,0,80,60);const blob=await new Promise(r=>canvas.toBlob(r,'image/png'));await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);});
+ const pastePoint=await page.locator('#viewport').evaluate((el,p)=>{const q=new DOMPoint(p.x,p.y).matrixTransform(el.getScreenCTM().inverse());return {x:q.x,y:q.y};},{x:canvas.x+canvas.width*.75,y:canvas.y+canvas.height*.75});
  await page.keyboard.press('ControlOrMeta+v');await page.locator('#paths image').waitFor({state:'attached'});
  let d=await save();assert.equal(d.images.length,1);assert.equal(d.layers.length,2);assert.equal(d.layers.at(-1).locked,false);assert.equal(d.layers.at(-1).visible,true);assert.deepEqual(d.layers.at(-1).imageIds,[d.images[0].id]);
- assert.equal(d.images[0].width,80);assert.equal(d.images[0].height,60);assert.deepEqual(d.calibration,initial.calibration);assert.equal(d.paths[0].note,'尚未保存的修改');assert.deepEqual(d.paths[0].nodes,initial.paths[0].nodes);assert.equal(d.width,1000);assert.equal(d.height,700);
+ assert.ok(Math.abs(d.images[0].x-pastePoint.x)<1e-3);assert.ok(Math.abs(d.images[0].y-pastePoint.y)<1e-3);assert.equal(d.images[0].width,80);assert.equal(d.images[0].height,60);assert.deepEqual(d.calibration,initial.calibration);assert.equal(d.paths[0].note,'尚未保存的修改');assert.deepEqual(d.paths[0].nodes,initial.paths[0].nodes);assert.equal(d.width,1000);assert.equal(d.height,700);
  assert.equal(await page.locator('#layer-list .layer-row.active').count(),1);assert.equal(await page.locator('#selection-overlay [data-corner]').count(),4);assert.equal(await page.locator('[data-tool="select"]').getAttribute('aria-pressed'),'true');
  await page.locator('#undo').click();d=await save();assert.equal(d.images.length,0);assert.equal(d.layers.length,1);assert.equal(d.paths[0].note,'尚未保存的修改');
  await page.locator('#redo').click();d=await save();assert.equal(d.images.length,1);

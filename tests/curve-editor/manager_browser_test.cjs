@@ -1,0 +1,97 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {mkdtemp,rm}=require('node:fs/promises');
+const {tmpdir}=require('node:os');
+const path=require('node:path');
+const {spawn,execFileSync}=require('node:child_process');
+const {chromium}=require('playwright');
+
+test('menu names and webpage names stay in sync without losing draft or history; blank new page is protected',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'curve-menu-browser-')),registry=path.join(root,'registry');
+ const env={...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:registry,CURVE_EDITOR_SCAN_PORTS:''};
+ const serverPath=path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py');
+ const managerPath=path.join(path.dirname(serverPath),'manager.py');
+ const server=spawn('python3',[serverPath,'--project',root,'--port','0','--session','browser-menu','--name','初始名称','--blank'],{env});
+ const browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
+ t.after(async()=>{await browser.close();if(server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(root,{recursive:true,force:true});});
+ const url=await new Promise((resolve,reject)=>{let output='';server.stdout.on('data',s=>{output+=s;const match=output.match(/http:\/\/127\.0\.0\.1:\d+/);if(match)resolve(match[0]);});server.once('error',reject);});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(url);await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await page.waitForFunction(()=>document.title.includes('初始名称'));
+ assert.equal(await page.title(),'初始名称');
+ assert.equal(await page.locator('#editor-edition').textContent(),'[测试]');
+ const drawingId=await page.locator('#editor-id').textContent();
+ assert.match(drawingId,/^图-[0-9a-f]{12}$/);
+ assert.equal((await page.request.get(url+'/api/editor').then(r=>r.json())).drawingId,drawingId);
+ assert.equal(await page.locator('#layer-list .curve-item').count(),0);
+ // Make real edits, then rename through the webpage's own modal.
+ await page.locator('#project-file').setInputFiles(path.resolve('tools/curve-editor/examples/心形_可编辑示例.json'));
+ if(await page.locator('#panel-properties').getAttribute('open')===null)await page.locator('#panel-properties > summary').click();
+ const original=await page.locator('#path-name').inputValue();
+ await page.locator('#path-name').fill('尚未保存的草稿');await page.locator('#path-name').press('Tab');
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok()&&r.request().postDataJSON().editedAt>0);
+ const firstEdit=(await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt;
+ await page.locator('#path-name').fill('仍未保存的第二次编辑');await page.locator('#path-name').press('Tab');
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok()&&r.request().postDataJSON().editedAt>firstEdit);
+ assert.ok((await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt>firstEdit);
+ await page.locator('#undo').click();
+ await page.route('**/api/editor',route=>route.request().method()==='POST'?route.abort('connectionrefused'):route.continue());
+ await page.locator('#editor-rename').click();await page.locator('#editor-name').fill('网页命名');await page.locator('#editor-name-confirm').click();
+ await page.waitForFunction(()=>document.getElementById('editor-name-error').textContent.length>0);
+ assert.match(await page.locator('#editor-name-error').textContent(),/本机编辑器服务未连接/);
+ assert.equal(await page.locator('#editor-name-dialog').isVisible(),true);
+ assert.equal(await page.locator('#editor-name').inputValue(),'网页命名');
+ await page.unroute('**/api/editor');await page.locator('#editor-name-confirm').click();
+ await page.waitForFunction(()=>document.title==='网页命名');
+ const list=()=>JSON.parse(execFileSync('python3',[managerPath,'list'],{env,encoding:'utf8'})).editors;
+ const entry=list()[0];assert.equal(entry.name,'网页命名');
+ execFileSync('python3',[managerPath,'rename','--id',entry.id,'--name','菜单改名'],{env});
+ await page.waitForFunction(()=>document.title==='菜单改名');
+ assert.equal(await page.locator('#editor-id').textContent(),drawingId);
+ assert.equal(await page.locator('#path-name').inputValue(),'尚未保存的草稿');
+ await page.locator('#undo').click();assert.equal(await page.locator('#path-name').inputValue(),original);
+ await page.locator('#redo').click();assert.equal(await page.locator('#path-name').inputValue(),'尚未保存的草稿');
+ await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok());
+ const edited=(await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt;
+ await page.reload();await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok());
+ assert.equal((await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt,edited);
+ assert.equal(await page.locator('#editor-id').textContent(),drawingId);
+ // A final edit must retain its timestamp even if navigation interrupts its
+ // presence report; restoring a journal must report the original edit time.
+ await page.route('**/api/presence',route=>route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'}));
+ await page.reload();await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ const beforeRecovery=(await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt;
+ await page.locator('#path-name').fill('最后一步随刷新恢复');await page.locator('#path-name').press('Tab');
+ await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok());
+ await page.reload();await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ assert.equal(await page.locator('#path-name').inputValue(),'最后一步随刷新恢复');
+ await page.unroute('**/api/presence');
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok()&&r.request().postDataJSON().editedAt>beforeRecovery,{timeout:6000});
+ assert.ok((await page.request.get(url+'/api/editor').then(r=>r.json())).lastEditedAt>beforeRecovery);
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok());
+ assert.throws(()=>execFileSync('python3',[managerPath,'remove','--id',entry.id],{env,stdio:'pipe'}),e=>/未保存/.test(e.stdout.toString()));
+ await page.locator('#save').click();await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await page.waitForResponse(r=>r.url().endsWith('/api/presence')&&r.ok());
+ execFileSync('python3',[managerPath,'remove','--id',entry.id],{env});
+ assert.equal(list().length,0);assert.deepEqual(errors,[]);
+});
+
+
+test('official pages show the artwork name in the tab and edition in the header even on narrow screens',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'curve-official-browser-'));
+ const env={...process.env,CURVE_EDITOR_EDITION:'official',CURVE_EDITOR_REGISTRY:path.join(root,'registry'),CURVE_EDITOR_SCAN_PORTS:''};
+ const server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',root,'--port','0','--session','official-label','--name','正式作品','--blank'],{env});
+ let browser;
+ t.after(async()=>{await browser?.close();if(server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(root,{recursive:true,force:true});});
+ const url=await new Promise((resolve,reject)=>{let output='';server.stdout.on('data',s=>{output+=s;const match=output.match(/http:\/\/127\.0\.0\.1:\d+/);if(match)resolve(match[0]);});server.once('error',reject);});
+ browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
+ const page=await browser.newPage({viewport:{width:680,height:900}});
+ await page.goto(url);await page.waitForFunction(()=>document.title.includes('正式作品'));
+ assert.equal(await page.title(),'正式作品');
+ assert.equal(await page.locator('#editor-edition').textContent(),'[正式]');
+ assert.equal(await page.locator('#editor-edition').isVisible(),true);
+ assert.equal((await (await page.request.get(url+'/api/editor')).json()).edition,'official');
+});

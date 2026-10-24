@@ -6,20 +6,48 @@ const {tmpdir}=require('node:os');
 const path=require('node:path');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
+const {expandLayerContents}=require('./layer_tree_helpers.cjs');
 
 async function setup(t){
  const project=await mkdtemp(path.join(tmpdir(),'curve-editor-replay-'));let server,browser;
  t.after(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(project,{recursive:true,force:true});});
- server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','auto']);
+ server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const m=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(m){clearTimeout(timer);resolve(m[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  page.on('dialog',d=>d.accept());await page.goto(url);
  await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ await expandLayerContents(page);
  const panel=async key=>{if(await page.locator(`#panel-${key}`).getAttribute('open')===null)await page.locator(`#panel-${key} > summary`).click();};
- const settled=()=>page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
+ const settled=async()=>{await page.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});await expandLayerContents(page);};
  return {page,errors,panel,settled};
 }
+
+test('locally recorded artwork reloads without a confirmation even when the refresh journal is unavailable',async t=>{
+ const {page,errors,panel,settled}=await setup(t),dialogs=[];page.on('dialog',d=>dialogs.push(d.type()));
+ await panel('properties');
+ await page.locator('#path-name').fill('自动记录后直接刷新');await page.locator('#path-name').press('Tab');
+ await page.locator('#path-note').fill('重做内容');await page.locator('#path-note').press('Tab');await page.locator('#undo').click();await settled();
+ // The committed database is enough; a failed redundant unload journal must
+ // neither cause a false warning nor discard the current artwork or redo.
+ await page.evaluate(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,...args){if(key.startsWith('curve-editor-refresh:'))throw new DOMException('Journal full','QuotaExceededError');return set.call(this,key,...args);};});
+ await page.reload();await settled();
+ assert.deepEqual(dialogs,[]);assert.equal(await page.locator('#path-name').inputValue(),'自动记录后直接刷新');assert.equal(await page.locator('#path-note').inputValue(),'');
+ assert.match(await page.locator('#undo').getAttribute('title'),/可撤销 1 步/);assert.match(await page.locator('#redo').getAttribute('title'),/可重做 1 步/);
+ await page.locator('#redo').click();assert.equal(await page.locator('#path-note').inputValue(),'重做内容');assert.deepEqual(errors,[]);
+});
+
+test('reload confirmation remains while local recording is pending or unavailable',async t=>{
+ const {page,errors,panel,settled}=await setup(t);await panel('properties');
+ await page.evaluate(()=>{const timeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>timeout(fn,ms===120?5000:ms,...args);});
+ await page.locator('#path-name').fill('尚未完成记录');await page.locator('#path-name').press('Tab');
+ assert.equal(await page.locator('#history-storage').getAttribute('data-state'),'saving');
+ const warns=()=>page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;});
+ assert.equal(await warns(),true);await settled();assert.equal(await warns(),false);await settled();
+ await page.evaluate(()=>{const transaction=IDBDatabase.prototype.transaction;IDBDatabase.prototype.transaction=function(stores,mode,...args){if(mode==='readwrite')throw new Error('Local recording unavailable');return transaction.call(this,stores,mode,...args);};});
+ await page.locator('#path-note').fill('本机写入失败');await page.locator('#path-note').press('Tab');
+ assert.equal(await warns(),true);assert.equal(await page.locator('#history-storage').getAttribute('data-state'),'unavailable');assert.equal(await warns(),true);assert.deepEqual(errors,[]);
+});
 
 test('unsaved artwork, operation records and redo survive reload; playback preserves the current work',async t=>{
  const {page,errors,panel,settled}=await setup(t);
@@ -40,7 +68,7 @@ test('unsaved artwork, operation records and redo survive reload; playback prese
  assert.equal(await page.locator('#path-name').inputValue(),initialName);
  assert.equal(await page.locator('#save').evaluate(e=>e.closest('[inert]')!==null),true);
  await page.keyboard.press('Delete');
- assert.equal(await page.locator('#curve-list button').count(),1);
+ assert.equal(await page.locator('#layer-list .curve-select').count(),1);
  await page.locator('#replay-next').click();assert.equal(await page.locator('#path-name').inputValue(),'刷新后的作品');
  await page.locator('#replay-stop').click();
  assert.equal(Number(await page.locator('#node-x').inputValue()),initialX+25);
@@ -70,7 +98,7 @@ test('image import and transform remain replayable after refresh and sessions ar
  assert.equal(await page.locator('#paths image').count(),1);assert.equal(Number(await page.locator('#element-width').inputValue()),60);
  await page.locator('#history-list [data-step="0"]').click();assert.equal(await page.locator('#paths image').count(),0);
  await page.locator('#replay-stop').click();assert.equal(await page.locator('#paths image').count(),1);
- await page.route('**/api/health',route=>route.fulfill({json:{project:'/different-project',saves:'/different-project/work/curve_editor/sessions'}}));
+ await page.route('**/api/health',route=>route.fulfill({json:{project:'/different-project',saves:'/different-project/work/curve_editor/test-sessions'}}));
  await page.reload();await settled();assert.equal(await page.locator('#paths image').count(),0);assert.equal(await page.locator('#undo').isDisabled(),true);
  assert.deepEqual(errors,[]);
 });
@@ -94,7 +122,7 @@ test('a file import finishing during replay returns to the real artwork before a
  const imported={format:'daban-curve-editor',version:1,units:'image-px',width:1000,height:700,title:'新导入作品',image:null,paths:[{id:'imported',name:'导入后',color:'#e04544',role:'outline',closed:false,nodes:[G.node(100,100),G.node(300,300)]}]};
  await page.locator('#project-file').setInputFiles({name:'imported.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(imported))});
  await page.waitForFunction(()=>window.finishFileRead);await page.locator('#history-list [data-step="0"]').click();
- await page.evaluate(()=>window.finishFileRead());await page.locator('#curve-list button').filter({hasText:'导入后'}).waitFor({state:'attached'});
+ await page.evaluate(()=>window.finishFileRead());await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'导入后'}).waitFor({state:'attached'});
  assert.equal(await page.locator('#replay-stop').isDisabled(),true);
  await page.locator('#undo').click();assert.equal(await page.locator('#path-name').inputValue(),'导入前');
  await page.evaluate(()=>{const decode=Image.prototype.decode;Image.prototype.decode=function(){return new Promise(resolve=>{window.finishImageRead=()=>decode.call(this).then(resolve);});};});
@@ -135,11 +163,11 @@ test('an older completed save does not erase a newer refresh journal from anothe
  });
  await page.locator('#path-name').fill('较早保存的文字');await page.locator('#path-name').press('Tab');await page.waitForFunction(()=>window.finishQueuedSave);
  const journalKey=await page.evaluate(async()=>{
-  const health=await fetch('/api/health').then(r=>r.json()),key=JSON.stringify([health.project,health.saves]);
+  const health=await fetch('/api/health').then(r=>r.json()),key=JSON.stringify([health.project,health.saves]),recordKey=key+':sync-v1';
   const request=indexedDB.open('curve-editor-sessions',2),db=await new Promise(r=>request.onsuccess=()=>r(request.result));
-  const get=db.transaction('projects').objectStore('projects').get(key),journal=await new Promise(r=>get.onsuccess=()=>r(get.result));db.close();
+  const get=db.transaction('projects').objectStore('projects').get(recordKey),journal=await new Promise(r=>get.onsuccess=()=>r(get.result));db.close();
   journal.journalId='another-writer';journal.data.current.doc.paths[0].name='另一个标签的最新文字';
-  const storageKey=`curve-editor-refresh:${key}`;localStorage.setItem(storageKey,JSON.stringify(journal));window.finishQueuedSave();return storageKey;
+  const storageKey=`curve-editor-refresh:${recordKey}`;localStorage.setItem(storageKey,JSON.stringify(journal));window.finishQueuedSave();return storageKey;
  });
  assert.equal(await page.evaluate(key=>JSON.parse(localStorage.getItem(key))?.journalId,journalKey),'another-writer');
  assert.deepEqual(errors,[]);

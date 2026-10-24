@@ -1,6 +1,29 @@
 # Local artwork, saved sessions, and service records
 /work/
 
+# Local test data, screenshots, release backups, and generated output
+/tests/curve-editor/fixtures/
+/tmp/
+/output/
+*.[pP][nN][gG]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[gG][iI][fF]
+*.[wW][eE][bB][pP]
+*.[bB][mM][pP]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[hH][eE][iI][cC]
+*.[aA][vV][iI][fF]
+*.[iI][cC][oO]
+*.[iI][cC][nN][sS]
+*.[sS][vV][gG]
+*.[aA][iI]
+*.[dD][xX][fF]
+*.[pP][lL][tT]
+*.[pP][dD][fF]
+*.[eE][pP][sS]
+
 # Python caches
 __pycache__/
 *.py[cod]

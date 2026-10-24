@@ -11,6 +11,11 @@ def main():
     parser.add_argument('--project', type=Path, required=True)
     parser.add_argument('--port', default='auto')
     parser.add_argument('--open', action='store_true')
+    parser.add_argument('--name', help='页面及状态栏中的名称')
+    parser.add_argument('--blank', action='store_true', help='新工作区使用空白画板')
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument('--session', help='独立会话 ID；默认使用当前 Codex 会话')
+    scope.add_argument('--shared', help='共享工作区名称；default 访问旧版项目存档')
     args = parser.parse_args()
     server = Path(__file__).resolve().parents[1] / 'assets/editor/server.py'
     if not server.is_file():
@@ -18,6 +23,14 @@ def main():
     command = [sys.executable, str(server), '--project', str(args.project), '--port', args.port]
     if args.open:
         command.append('--open')
+    if args.name is not None:
+        command.extend(['--name', args.name])
+    if args.blank:
+        command.append('--blank')
+    if args.session is not None:
+        command.extend(['--session', args.session])
+    if args.shared is not None:
+        command.extend(['--shared', args.shared])
     os.execv(sys.executable, command)
 
 

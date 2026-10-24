@@ -21,11 +21,181 @@ SAMPLE = json.loads((ROOT / 'tools/curve-editor/examples/心形_可编辑示例.
 install_opener(build_opener(ProxyHandler({})))
 
 class ProjectIsolationTests(unittest.TestCase):
+    def test_curve_clipboard_v3_round_trips_mixed_items_and_rejects_invalid_content_atomically(self):
+        project = self.base / 'mixed-clipboard'
+        project.mkdir()
+        _, url = self.start(project)
+
+        def clipboard(data):
+            request = Request(url + '/api/curve-clipboard', data=json.dumps(data).encode(),
+                              headers={'Content-Type': 'application/json', 'Origin': url})
+            with urlopen(request, timeout=3) as response:
+                return json.load(response)
+
+        path = copy.deepcopy(SAMPLE['paths'][0])
+        image = {'id': 'image-1', 'name': '参考.png', 'dataUrl': 'data:image/png;base64,aW1hZ2U=',
+                 'x': -10, 'y': 20, 'width': 30, 'height': 40, 'opacity': .8, 'rotation': 15}
+        text = {'id': 'text-1', 'name': '说明', 'content': '正面', 'x': 12, 'y': 18,
+                'fontSize': 24, 'color': '#123ABC', 'rotation': -5}
+        payload = {
+            'format': 'curve-editor-clipboard', 'version': 3,
+            'paths': [path], 'images': [image], 'texts': [text],
+            'items': [{'type': 'image', 'id': image['id']},
+                      {'type': 'path', 'id': path['id']},
+                      {'type': 'text', 'id': text['id']}],
+            'calibration': None, 'sourcePageId': 'source-page', 'copiedAt': 987654321,
+        }
+        clipboard({'action': 'write', 'clipboard': payload})
+        self.assertEqual(clipboard({'action': 'read'}), payload)
+
+        invalid_payloads = []
+        for missing in ('paths', 'images', 'texts'):
+            value = copy.deepcopy(payload)
+            del value[missing]
+            invalid_payloads.append(value)
+        invalid_payloads.append({**payload, 'paths': [], 'images': [], 'texts': [], 'items': []})
+        invalid_path = copy.deepcopy(payload)
+        invalid_path['paths'][0]['nodes'][0]['x'] = 'left'
+        invalid_payloads.append(invalid_path)
+        invalid_image = copy.deepcopy(payload)
+        invalid_image['images'][0]['width'] = 0
+        invalid_payloads.append(invalid_image)
+        invalid_text = copy.deepcopy(payload)
+        invalid_text['texts'][0]['fontSize'] = 0
+        invalid_payloads.append(invalid_text)
+        invalid_payloads.extend([
+            {**payload, 'items': [payload['items'][0], payload['items'][0], *payload['items'][1:]]},
+            {**payload, 'items': [{'type': 'image', 'id': 'missing'}, *payload['items'][1:]]},
+            {**payload, 'items': payload['items'][:-1]},
+            {**payload, 'items': [{'type': 'shape', 'id': path['id']}, *payload['items'][1:]]},
+        ])
+        too_many_images = [{**image, 'id': f'image-{index}'} for index in range(201)]
+        invalid_payloads.append({**payload, 'paths': [], 'images': too_many_images, 'texts': [], 'items': []})
+
+        for invalid in invalid_payloads:
+            with self.subTest(invalid=invalid), self.assertRaises(HTTPError) as failure:
+                clipboard({'action': 'write', 'clipboard': invalid})
+            self.assertEqual(failure.exception.code, 400)
+            failure.exception.close()
+            self.assertEqual(clipboard({'action': 'read'}), payload)
+
+        image_only = {key: value for key, value in payload.items() if key != 'items'}
+        image_only.update(paths=[], texts=[], copiedAt=payload['copiedAt'] + 1)
+        clipboard({'action': 'write', 'clipboard': image_only})
+        self.assertEqual(clipboard({'action': 'read'}), image_only)
+
+    def test_curve_clipboard_v2_preserves_physical_scale_and_rejects_invalid_metadata(self):
+        project=self.base/'physical-clipboard';project.mkdir();_,url=self.start(project)
+        def clipboard(data):
+            with urlopen(Request(url+'/api/curve-clipboard',data=json.dumps(data).encode(),headers={'Content-Type':'application/json','Origin':url}),timeout=3) as response:
+                return json.load(response)
+        calibration={'a':{'x':0,'y':0},'b':{'x':100,'y':0},'length':5,'unit':'cm'}
+        payload={'format':'curve-editor-clipboard','version':2,'paths':SAMPLE['paths'],'calibration':calibration,'sourcePageId':'source-page','copiedAt':123456789}
+        clipboard({'action':'write','clipboard':payload})
+        self.assertEqual(clipboard({'action':'read'}),payload)
+        for patch in [{'calibration':False},{'calibration':{**calibration,'length':0}},{'calibration':{**calibration,'unit':'px'}},{'sourcePageId':''},{'sourcePageId':7}]:
+            with self.subTest(patch=patch),self.assertRaises(HTTPError) as failed:
+                clipboard({'action':'write','clipboard':{**payload,**patch}})
+            self.assertEqual(failed.exception.code,400);failed.exception.close()
+            self.assertEqual(clipboard({'action':'read'}),payload)
+        missing={**payload};del missing['calibration']
+        with self.assertRaises(HTTPError) as failed:clipboard({'action':'write','clipboard':missing})
+        self.assertEqual(failed.exception.code,400);failed.exception.close()
+        uncalibrated={**payload,'calibration':None};clipboard({'action':'write','clipboard':uncalibrated})
+        self.assertEqual(clipboard({'action':'read'}),uncalibrated)
+        self.assertIsNone(self.read(url,'/api/latest'))
+
+    def test_curve_clipboard_late_older_writes_cannot_replace_newer_copy_across_ports(self):
+        urls=[]
+        for name in ('clipboard-order-a','clipboard-order-b'):
+            project=self.base/name;project.mkdir();_,url=self.start(project);urls.append(url)
+        def request(url,data):
+            with urlopen(Request(url+'/api/curve-clipboard',data=json.dumps(data).encode(),headers={'Content-Type':'application/json','Origin':url}),timeout=3) as response:
+                return json.load(response)
+        payload={'format':'curve-editor-clipboard','version':2,'paths':SAMPLE['paths'],'calibration':None,'sourcePageId':'source'}
+        def write(timestamp):
+            return request(urls[timestamp%2],{'action':'write','clipboard':{**payload,'copiedAt':timestamp}})
+        write(20);write(10)
+        self.assertEqual(request(urls[0],{'action':'read'})['copiedAt'],20)
+        with ThreadPoolExecutor(max_workers=8) as pool:list(pool.map(write,[24,28,22,26,30,21,29,23,27,25]))
+        self.assertEqual(request(urls[1],{'action':'read'})['copiedAt'],30)
+
+    def test_curve_clipboard_shared_across_projects_without_touching_saves(self):
+        first, second = self.base / 'copy', self.base / 'paste'
+        first.mkdir(); second.mkdir()
+        _, source = self.start(first)
+        _, target = self.start(second)
+        def clipboard(url, data, origin=None):
+            with urlopen(Request(url + '/api/curve-clipboard', data=json.dumps(data).encode(),
+                                 headers={'Content-Type': 'application/json', 'Origin': origin or url}), timeout=3) as response:
+                return json.load(response)
+        self.assertIsNone(clipboard(target, {'action': 'read'}))
+        payload = {'format': 'curve-editor-clipboard', 'version': 1, 'paths': SAMPLE['paths']}
+        clipboard(source, {'action': 'write', 'clipboard': payload})
+        self.assertEqual(clipboard(target, {'action': 'read'}), payload)
+        third, fourth = self.base / 'other-registry', self.base / 'other-edition'
+        third.mkdir(); fourth.mkdir()
+        _, isolated = self.start(third, registry_dir=self.base / 'isolated-registry')
+        _, official = self.start(fourth, edition='official')
+        self.assertIsNone(clipboard(isolated, {'action': 'read'}))
+        self.assertIsNone(clipboard(official, {'action': 'read'}))
+        self.assertIsNone(self.read(source, '/api/latest'))
+        self.assertIsNone(self.read(target, '/api/latest'))
+        for data, origin, code in [
+                ({'action': 'write', 'clipboard': {**payload, 'paths': []}}, source, 400),
+                ({'action': 'write', 'clipboard': {**payload, 'paths': [{'id': 'bad'}]}}, source, 400),
+                ({'action': 'write', 'clipboard': {**payload, 'copiedAt': -1}}, source, 400),
+                ({'action': 'read'}, 'https://example.com', 403),
+                ({'action': 'write', 'clipboard': payload}, target, 403)]:
+            with self.assertRaises(HTTPError) as failure:
+                clipboard(source, data, origin)
+            self.assertEqual(failure.exception.code, code)
+            failure.exception.close()
+        self.assertEqual(clipboard(target, {'action': 'read'}), payload)
+
+    def test_symmetry_metadata_round_trip_and_invalid_metadata_rejected(self):
+        project = self.base / '关联对称'
+        project.mkdir()
+        _, url = self.start(project)
+        document = copy.deepcopy(SAMPLE)
+        document['mirrorAxisVisible'] = False
+        document['symmetryLinks'] = [{'id': 'pair', 'axis': {'a': {'x': 0, 'y': 0}, 'b': {'x': 0, 'y': 100}}}]
+        document['paths'][0]['nodes'][0]['symmetry'] = {'out': {'id': 'pair', 'side': 0, 'dir': 1}}
+        def save(data):
+            return urlopen(Request(url + '/api/save', data=json.dumps(data).encode(), headers={'Content-Type': 'application/json', 'Origin': url}), timeout=3)
+        with save(document) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.read(url, '/api/latest')['symmetryLinks'], document['symmetryLinks'])
+        invalid = copy.deepcopy(document)
+        invalid['paths'][0]['nodes'][0]['symmetry']['out']['side'] = 2
+        with self.assertRaises(HTTPError) as failure:
+            save(invalid)
+        self.assertEqual(failure.exception.code, 400)
+        failure.exception.close()
+        self.assertEqual(self.read(url, '/api/latest')['paths'], document['paths'])
+
+    def test_node_colors_round_trip_and_invalid_node_colors_do_not_replace_the_saved_artwork(self):
+        project = self.base / '节点颜色'
+        project.mkdir()
+        _, url = self.start(project)
+        document = copy.deepcopy(SAMPLE)
+        document['paths'][0]['nodes'][0]['color'] = '#C43283'
+        request = Request(url + '/api/save', data=json.dumps(document).encode(), headers={'Content-Type': 'application/json', 'Origin': url})
+        with urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.read(url, '/api/latest')['paths'][0]['nodes'][0]['color'], '#C43283')
+        document['paths'][0]['nodes'][0]['color'] = 'red'
+        request = Request(url + '/api/save', data=json.dumps(document).encode(), headers={'Content-Type': 'application/json', 'Origin': url})
+        with self.assertRaises(HTTPError) as failure:
+            urlopen(request, timeout=3)
+        self.assertEqual(failure.exception.code, 400)
+        self.assertEqual(self.read(url, '/api/latest')['paths'][0]['nodes'][0]['color'], '#C43283')
+
     def test_parallel_editor_resources_load_without_dropping_connections(self):
         project = self.base/'并行页面资源'
         project.mkdir()
         _, url = self.start(project)
-        resources = ['/index.html', '/style.css', '/app.js', '/geometry.js', '/interactions.js', '/layers.js', '/tracing.js', '/offset.js', '/vendor/clipper.js'] * 4
+        resources = ['/index.html', '/style.css', '/app.js', '/geometry.js', '/fairing.js', '/interactions.js', '/layers.js', '/tracing.js', '/offset.js', '/vendor/clipper.js'] * 4
         gate = threading.Barrier(len(resources))
         def read_resource(resource):
             gate.wait(timeout=5)
@@ -39,13 +209,13 @@ class ProjectIsolationTests(unittest.TestCase):
     def test_old_server_is_preserved_but_not_reused_for_portable_history_editor(self):
         project = self.base/'升级兼容'
         project.mkdir()
-        saves = project/'work/curve_editor/sessions'
+        saves = project/'work/curve_editor/test-sessions'
         saves.mkdir(parents=True)
         class LegacyHandler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
             def do_GET(self):
-                body = json.dumps({'app': 'daban-curve-editor-v1', 'project': str(project.resolve()), 'saves': str(saves.resolve()), 'editorRevision': 'curve-offset-v1'}).encode()
+                body = json.dumps({'app': 'daban-curve-editor-v1', 'project': str(project.resolve()), 'saves': str(saves.resolve()), 'editorRevision': 'editor-outline-v1'}).encode()
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -59,7 +229,7 @@ class ProjectIsolationTests(unittest.TestCase):
         proc, url = self.start(project)
         self.assertNotEqual(url, f'http://127.0.0.1:{legacy.server_port}')
         self.assertIsNone(proc.poll())
-        self.assertEqual(self.read(url, '/api/health')['editorRevision'], 'portable-history-v1')
+        self.assertRegex(self.read(url, '/api/health')['editorRevision'], r'^editor-[0-9a-f]{16}$')
         self.assertEqual(self.read(f'http://127.0.0.1:{legacy.server_port}', '/api/health')['project'], str(project.resolve()))
 
     def setUp(self):
@@ -74,8 +244,8 @@ class ProjectIsolationTests(unittest.TestCase):
             proc.communicate(timeout=5)
         self.temp.cleanup()
 
-    def start(self, project):
-        proc = subprocess.Popen([sys.executable, str(SERVER), '--project', str(project), '--port', 'auto'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    def start(self, project, port="0", registry_dir=None, edition='test'):
+        proc = subprocess.Popen([sys.executable, str(SERVER), '--project', str(project), '--port', port, '--shared', 'default'], env={**os.environ, "CURVE_EDITOR_EDITION": edition, 'CURVE_EDITOR_REGISTRY': str(registry_dir or self.base / 'registry'), 'CURVE_EDITOR_SCAN_PORTS': ''}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.children.append(proc)
         deadline = time.monotonic() + 10
         lines = []
@@ -87,7 +257,7 @@ class ProjectIsolationTests(unittest.TestCase):
                 break
             lines.append(line)
             if 'http://127.0.0.1:' in line:
-                return proc, line[line.index('http://127.0.0.1:'):].strip()
+                return proc, line[line.index('http://127.0.0.1:'):].strip().split('?', 1)[0]
         self.fail('Server did not start: ' + ''.join(lines))
 
     def read(self, url, path):
@@ -110,6 +280,24 @@ class ProjectIsolationTests(unittest.TestCase):
 
     def packed_snapshot(self, document, **state):
         return {'doc': document, **self.editor_state(**state)}
+
+    def test_outer_contour_tool_survives_portable_operation_history(self):
+        project = self.base/'外轮廓操作记录'
+        project.mkdir()
+        _, url = self.start(project)
+        operation_history = {
+            'format': 'curve-editor-session', 'version': 1, 'assets': [],
+            'data': {
+                'current': self.editor_state(tool='outline'),
+                'history': {
+                    'version': 1,
+                    'past': [self.packed_snapshot(copy.deepcopy(SAMPLE), tool='outline')],
+                    'future': [], 'pastLabels': ['提取外轮廓'], 'futureLabels': [],
+                },
+            },
+        }
+        saved = self.save(url, '外轮廓', operationHistory=operation_history)
+        self.assertEqual(json.loads(Path(saved['path']).read_text())['operationHistory'], operation_history)
 
     def test_portable_operation_history_round_trips_deleted_images_and_redo_entries(self):
         project = self.base/'便携历史'
@@ -286,6 +474,36 @@ class ProjectIsolationTests(unittest.TestCase):
         svg = Path(saved['path']).with_suffix('.svg').read_text()
         self.assertIn('width="368px" height="288px" viewBox="-24 -34 368 288"', svg)
         self.assertIn('<image width="300" height="200"', svg)
+
+    def test_hidden_paths_round_trip_stay_out_of_svg_and_require_a_boolean(self):
+        project = self.base/'曲线可见性'
+        project.mkdir()
+        _, url = self.start(project)
+        baseline = self.save(url, '原始范围')
+        baseline_svg = Path(baseline['path']).with_suffix('.svg').read_text().splitlines()[0]
+        paths = copy.deepcopy(SAMPLE['paths'])
+        hidden = copy.deepcopy(paths[0])
+        hidden.update(id='hidden', name='隐藏曲线', visible=False, color='#010203')
+        for node in hidden['nodes']:
+            for point in (node, node['in'], node['out']):
+                point['x'] -= 10000
+        paths.append(hidden)
+        for extra in ({}, {'layers': [{'id': 'layer', 'name': '图层', 'visible': True, 'locked': False,
+                                      'pathIds': [p['id'] for p in paths], 'imageIds': []}], 'images': []}):
+            saved = self.save(url, '隐藏一条曲线', paths=paths, **extra)
+            self.assertEqual(self.read(url, '/api/latest')['paths'], paths)
+            svg = Path(saved['path']).with_suffix('.svg').read_text()
+            self.assertEqual(svg.splitlines()[0], baseline_svg)
+            self.assertNotIn('隐藏曲线', svg)
+            self.assertNotIn('#010203', svg)
+        for invalid in (1, 0, 'false', None, [], {}):
+            with self.subTest(visible=invalid):
+                invalid_paths = copy.deepcopy(paths)
+                invalid_paths[0]['visible'] = invalid
+                with self.assertRaises(HTTPError) as error:
+                    self.save(url, '无效可见性', paths=invalid_paths)
+                self.assertEqual(error.exception.code, 400)
+                self.assertEqual(self.read(url, '/api/latest')['paths'], paths)
 
     def test_dashed_paths_round_trip_export_and_require_a_boolean(self):
         project = self.base/'虚线路径'
@@ -482,7 +700,7 @@ class ProjectIsolationTests(unittest.TestCase):
         self.assertEqual(self.read(url_b, '/api/latest')['title'], '项目B修改')
         with urlopen(url_a + '/', timeout=3) as response:
             self.assertIn('通用矢量图编辑器', response.read().decode())
-        again, same_url = self.start(a)
+        again, same_url = self.start(a, port="auto")
         self.assertEqual(same_url, url_a)
         self.assertEqual(again.wait(timeout=3), 0)
         conflict = subprocess.run([sys.executable, str(SERVER), '--project', str(a), '--port', url_b.rsplit(':',1)[1]], capture_output=True, text=True, timeout=5)

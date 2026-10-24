@@ -2,11 +2,15 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const G=require('../../tools/curve-editor/geometry.js');
 const O=require('../../tools/curve-editor/offset.js');
+const C=require('../../tools/curve-editor/vendor/clipper.js');
+const {fixtureOptions}=require('./fixture_helpers.cjs');
 const path=(pts,closed=true,id='a')=>({id,closed,name:'original',extra:{value:3},nodes:pts.map(([x,y])=>G.node(x,y))});
 const square=()=>path([[0,0],[100,0],[100,100],[0,100]]);
 const near=(a,b,tol=.08)=>assert.ok(Math.abs(a-b)<=tol,`${a} != ${b}`);
 const offset=(p,d,opts={})=>O.offsetContours(O.prepareContours(Array.isArray(p)?p:[p]),d,opts);
 const bounds=p=>G.pathBounds(p);
+const headOutlineOptions=fixtureOptions('offset-head-outline.json');
+const headOutline=headOutlineOptions.skip?null:require('./fixtures/offset-head-outline.json');
 function circle(r=100){
  const k=.5522847498307936*r,p=path([[r,0],[0,r],[-r,0],[0,-r]]);
  const handles=[[[r,-k],[r,k]],[[k,r],[-k,r]],[[-r,k],[-r,-k]],[[-k,-r],[k,-r]]];
@@ -27,6 +31,52 @@ test('curved circles keep editable handles and accurate normal-distance geometry
   assert.ok(p.nodes.length<64,`too many nodes: ${p.nodes.length}`);assert.ok(p.nodes.some(n=>G.dist(n,n.out)>1));
   for(let i=0;i<p.nodes.length;i++)for(let j=0;j<=20;j++){const q=G.at(p.nodes[i],p.nodes[(i+1)%p.nodes.length],j/20);near(Math.hypot(q.x,q.y),r,.1);}
  }
+});
+test('smooth elongated contours do not multiply anchors to compensate for fitting parameters',()=>{
+ const source=circle();for(const n of source.nodes){n.y*=2.5;n.in.y*=2.5;n.out.y*=2.5;}
+ const before=JSON.stringify(source),result=offset(source,15,{tolerancePx:.05})[0].path;
+ assert.ok(result.nodes.length<=12,`too many nodes for a smooth ellipse: ${result.nodes.length}`);
+ // Check the actual normal-offset locus, independently of fitter parameters.
+ for(let i=0;i<4;i++)for(let j=0;j<=80;j++){
+  const a=source.nodes[i],b=source.nodes[(i+1)%4],t=j/80,u=1-t,p=G.at(a,b,t);
+  const dx=3*u*u*(a.out.x-a.x)+6*u*t*(b.in.x-a.out.x)+3*t*t*(b.x-b.in.x);
+  const dy=3*u*u*(a.out.y-a.y)+6*u*t*(b.in.y-a.out.y)+3*t*t*(b.y-b.in.y),length=Math.hypot(dx,dy);
+  assert.ok(G.nearest(result,{x:p.x+15*dy/length,y:p.y-15*dx/length}).distance<.06);
+ }
+ assert.equal(JSON.stringify(source),before);
+});
+test('five millimetre expansion keeps the original 26-node budget when it meets the same precision',headOutlineOptions,()=>{
+ const source=headOutline.path,before=JSON.stringify(source),amount=O.physicalDistancePixels(5,'mm',headOutline.calibration);
+ const result=offset(source,amount,{tolerancePx:.05})[0].path;
+ assert.ok(result.nodes.length<=source.nodes.length,`26-node outline expanded to ${result.nodes.length} nodes`);
+ assert.equal(result.closed,true);assert.equal(JSON.stringify(source),before);
+ // Independent uniform source sampling, denser than the fitting reference.
+ const polygon=source.nodes.flatMap((a,i)=>Array.from({length:512},(_,j)=>{
+  const p=G.at(a,source.nodes[(i+1)%source.nodes.length],j/512);return {X:Math.round(p.x*1e6),Y:Math.round(p.y*1e6)};
+ }));
+ if(!C.Clipper.Orientation(polygon))polygon.reverse();
+ const engine=new C.ClipperOffset(4,100),loops=[];engine.AddPath(polygon,C.JoinType.jtMiter,C.EndType.etClosedPolygon);engine.Execute(loops,amount*1e6);
+ assert.equal(loops.length,1);const reference=loops[0].map(p=>({x:p.X/1e6,y:p.Y/1e6}));
+ const sub=(a,b)=>({x:a.x-b.x,y:a.y-b.y}),unit=v=>{const l=Math.hypot(v.x,v.y);return {x:v.x/l,y:v.y/l};},cross=(a,b)=>a.x*b.y-a.y*b.x;
+ // Convex joins have an exact analytic miter, independent of sample density.
+ for(const n of source.nodes){
+  const a=unit(sub(n,n.in)),b=unit(sub(n.out,n)),den=cross(a,b);if(den<1e-8)continue;
+  const p={x:n.x+amount*a.y,y:n.y-amount*a.x},q={x:n.x+amount*b.y,y:n.y-amount*b.x},t=cross(sub(q,p),b)/den;
+  const exact={x:p.x+t*a.x,y:p.y+t*a.y};if(G.dist(n,exact)>4*amount)continue;
+  let index=0;for(let i=1;i<reference.length;i++)if(G.dist(reference[i],exact)<G.dist(reference[index],exact))index=i;
+  reference[index]=exact;assert.ok(G.nearest(result,exact).distance<.0001,'exact convex corner moved');
+ }
+ const lineDistance=(p,a,b)=>{const v=sub(b,a),l=v.x*v.x+v.y*v.y,t=l?Math.max(0,Math.min(1,((p.x-a.x)*v.x+(p.y-a.y)*v.y)/l)):0;return Math.hypot(p.x-a.x-t*v.x,p.y-a.y-t*v.y);};
+ for(let i=0;i<reference.length;i+=8)assert.ok(G.nearest(result,reference[i]).distance<.05,'reference is outside requested precision');
+ for(let i=0;i<result.nodes.length;i++)for(let j=0;j<=40;j++){
+  const p=G.at(result.nodes[i],result.nodes[(i+1)%result.nodes.length],j/40);
+  assert.ok(Math.min(...reference.map((a,k)=>lineDistance(p,a,reference[(k+1)%reference.length])))<.05,'fit is outside requested precision');
+ }
+});
+test('stricter physical precision adds only the local anchors needed by the source fit',headOutlineOptions,()=>{
+ const scale=G.millimetersPerPixel(headOutline.calibration),source=headOutline.path;
+ const result=offset(source,5/scale,{tolerancePx:.01/scale})[0].path;
+ assert.ok(result.nodes.length<=34,`strict fit discarded source knots: ${result.nodes.length}`);
 });
 test('open lines offset visually left/up and reverse direction switches the side',()=>{
  const p=path([[0,0],[100,0]],false);

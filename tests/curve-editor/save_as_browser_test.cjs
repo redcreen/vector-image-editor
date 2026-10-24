@@ -10,7 +10,7 @@ const {chromium}=require('playwright');
 async function setup(t){
  const project=await mkdtemp(path.join(tmpdir(),'curve-editor-save-as-'));let server,browser;
  t.after(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(project,{recursive:true,force:true});});
- server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','auto']);
+ server=spawn('python3',[path.resolve(process.env.CURVE_EDITOR_SERVER||'tools/curve-editor/server.py'),'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const m=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(m){clearTimeout(timer);resolve(m[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -39,11 +39,11 @@ test('saved JSON restores undo, redo and playback in a fresh browser context',as
  const data=await saveJSON(page);assert.ok(data.operationHistory,'saved artwork must contain history');
  const context=await browser.newContext(),fresh=await context.newPage();fresh.on('dialog',d=>d.accept());fresh.on('pageerror',e=>errors.push(e.message));
  await fresh.goto(url);await fresh.locator('#history-storage[data-state="saved"]').waitFor({state:'attached'});
- await openJSON(fresh,data);await fresh.locator('#curve-list button').filter({hasText:'可携带记录'}).waitFor({state:'attached'});
+ await openJSON(fresh,data);await fresh.locator('#layer-list .curve-select').filter({hasText:'可携带记录'}).waitFor({state:'attached'});
  assert.match(await fresh.locator('#undo').getAttribute('title'),/可撤销 1 步/);assert.match(await fresh.locator('#redo').getAttribute('title'),/可重做 1 步/);
  // Explicit file-open must replace the other work's history and retain this cursor.
  await fresh.locator('#new').click();await openJSON(fresh,data);
- await fresh.locator('#curve-list button').filter({hasText:'可携带记录'}).waitFor({state:'attached'});
+ await fresh.locator('#layer-list .curve-select').filter({hasText:'可携带记录'}).waitFor({state:'attached'});
  await fresh.locator('#panel-properties > summary').click();
  assert.equal(await fresh.locator('#path-note').inputValue(),'');
  await fresh.locator('#redo').click();assert.equal(await fresh.locator('#path-note').inputValue(),'仍可重做');
@@ -65,7 +65,7 @@ test('Save As downloads a named copy with records and cancel leaves artwork unch
  assert.equal(data.paths[0].name,'副本里的曲线');assert.ok(data.operationHistory);
  assert.equal(await page.locator('#undo').getAttribute('title'),before);
  page.on('dialog',d=>d.accept());await page.locator('#new').click();await openJSON(page,data);
- await page.locator('#curve-list button').filter({hasText:'副本里的曲线'}).waitFor({state:'attached'});
+ await page.locator('#layer-list .curve-select').filter({hasText:'副本里的曲线'}).waitFor({state:'attached'});
  assert.match(await page.locator('#undo').getAttribute('title'),/可撤销 1 步/);assert.deepEqual(errors,[]);
 });
 
@@ -112,7 +112,7 @@ test('Save for AI omits portable records and historical images even after openin
  await page.locator('#image-file').setInputFiles({name:'只在历史里的图片.png',mimeType:'image/png',buffer:png});await page.locator('#paths image').waitFor({state:'attached'});
  await page.locator('[data-tool="select"]').click();await page.keyboard.press('Delete');await page.locator('#paths image').waitFor({state:'detached'});
  const portable=await saveJSON(page);assert.equal(portable.operationHistory.assets.length,1);await page.locator('#new').click();await openJSON(page,portable);
- await page.locator('#curve-list button').filter({hasText:'仅当前作品给 AI'}).waitFor({state:'attached'});
+ await page.locator('#layer-list .curve-select').filter({hasText:'仅当前作品给 AI'}).waitFor({state:'attached'});
  const response=page.waitForResponse(r=>r.url().endsWith('/api/save')&&r.request().method()==='POST');await page.locator('#save').click();assert.equal((await response).status(),200);
  const ai=await page.evaluate(()=>fetch('/api/latest').then(r=>r.json()));
  assert.equal(ai.paths[0].name,'仅当前作品给 AI');assert.equal(ai.operationHistory,undefined);assert.equal(ai.history,undefined);assert.equal(ai.images.length,0);assert.equal(JSON.stringify(ai).includes(png.toString('base64')),false);
@@ -145,7 +145,7 @@ test('a history-bearing artwork above 32MB can open and save again with all 100 
  const data={...doc,operationHistory:{format:'curve-editor-session',version:1,assets:[],data:{current:state,history:{version:1,past,future:[],pastLabels:Array(100).fill('移动节点'),futureLabels:[]}}}};
  const source=Buffer.from(JSON.stringify(data));assert.ok(source.length>32*1024*1024);
  await page.locator('#project-file').setInputFiles({name:'大记录作品.json',mimeType:'application/json',buffer:source});
- await page.locator('#curve-list button').filter({hasText:'大记录曲线'}).waitFor({state:'attached',timeout:6000});
+ await page.locator('#layer-list .curve-select').filter({hasText:'大记录曲线'}).waitFor({state:'attached',timeout:6000});
  assert.match(await page.locator('#undo').getAttribute('title'),/可撤销 100 步/);
  await page.locator('#save-as').click();await page.locator('#save-as-name').fill('完整大记录.json');
  const download=page.waitForEvent('download',{timeout:10000});await page.locator('#save-as-confirm').click();const file=await download;
@@ -153,7 +153,7 @@ test('a history-bearing artwork above 32MB can open and save again with all 100 
  assert.equal(restored.operationHistory.data.history.past.length,100);assert.equal(restored.paths[0].note,note);
  assert.equal(saved,JSON.stringify(restored),'portable files use compact JSON without discarding data');
  await page.locator('#new').click();await page.locator('#project-file').setInputFiles(await file.path());
- await page.locator('#curve-list button').filter({hasText:'大记录曲线'}).waitFor({state:'attached'});assert.match(await page.locator('#undo').getAttribute('title'),/可撤销 100 步/);
+ await page.locator('#layer-list .curve-select').filter({hasText:'大记录曲线'}).waitFor({state:'attached'});assert.match(await page.locator('#undo').getAttribute('title'),/可撤销 100 步/);
  await page.locator('#undo').click();assert.equal(Number(await page.locator('#node-x').inputValue()),199);
  await page.locator('#redo').click();assert.equal(Number(await page.locator('#node-x').inputValue()),200);assert.deepEqual(errors,[]);
 });

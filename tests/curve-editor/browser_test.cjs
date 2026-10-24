@@ -7,6 +7,7 @@ const {tmpdir}=require('node:os');
 const path=require('node:path');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
+const {expandLayerContents}=require('./layer_tree_helpers.cjs');
 async function expandPanels(page){const closed=page.locator('.panel-group:not([open]):not([data-panel="help"]) > summary');while(await closed.count())await closed.first().click();}
 
 const g=require('../../tools/curve-editor/geometry.js');
@@ -17,13 +18,13 @@ test('axis drawing snaps near horizontal and vertical with matching preview and 
  t.after(async()=>{await browser?.close();if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}await rm(project,{recursive:true,force:true});});
  const curve={id:'snap-target',name:'吸附参考',note:'',color:'#e04544',role:'outline',closed:false,nodes:[g.node(680,510),g.node(720,510)]};
  const initial={format:'daban-curve-editor',version:1,units:'image-px',width:1000,height:700,title:'对称轴吸附测试',paths:[curve],originals:[],image:null,opacity:.65};
- const saves=path.join(project,'work/curve_editor/sessions');await mkdir(saves,{recursive:true});
+ const saves=path.join(project,'work/curve_editor/test-sessions');await mkdir(saves,{recursive:true});
  await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
- server=spawn('python3',[serverScript,'--project',project,'--port','auto']);
+ server=spawn('python3',[serverScript,'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const match=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(url);await expandPanels(page);await page.locator('#curve-list button').filter({hasText:'吸附参考'}).waitFor();
+ await page.goto(url);await expandPanels(page);await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'吸附参考'}).waitFor();
  const screen=async p=>page.locator('#viewport').evaluate((el,p)=>{const s=new DOMPoint(p.x,p.y).matrixTransform(el.getScreenCTM());return {x:s.x,y:s.y};},p);
  const click=async p=>{const s=await screen(p);await page.mouse.click(s.x,s.y);};
  const move=async p=>{const s=await screen(p);await page.mouse.move(s.x,s.y);};
@@ -47,7 +48,7 @@ test('axis drawing snaps near horizontal and vertical with matching preview and 
  await start({x:300,y:220},{x:314,y:500});const vertical=await finish({x:314,y:500},{x:300,y:500},'竖直');
  await page.locator('#undo').click();near((await save()).mirrorAxis.b,horizontal.b);
  await page.locator('#redo').click();near((await save()).mirrorAxis.b,vertical.b);
- await page.reload();await page.locator('#curve-list button').filter({hasText:'吸附参考'}).waitFor();
+ await page.reload();await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'吸附参考'}).waitFor();
  near((await preview())[1],vertical.b);assert.match(await page.locator('#guides text').textContent(),/竖直/);
  await start({x:660,y:360},{x:250,y:340});await finish({x:250,y:340},{x:250,y:360},'水平');
  await start({x:750,y:560},{x:736,y:220});await finish({x:736,y:220},{x:750,y:220},'竖直');
@@ -69,13 +70,13 @@ test('mirror copies, measurement tools, contiguous ranges and save/restore work 
  const arc={id:'arc',name:'弧线',note:'',color:'#176bce',role:'note',closed:false,nodes:[g.node(500,200,'smooth'),g.node(600,200,'symmetric')]};
  arc.nodes[0].out={x:500,y:300};arc.nodes[0].in={x:500,y:150};arc.nodes[1].in={x:600,y:300};arc.nodes[1].out={x:600,y:100};
  const initial={format:'daban-curve-editor',version:1,units:'image-px',width:1000,height:700,title:'浏览器测试',paths:[square,arc],originals:[],image:null,opacity:.65};
- const saves=path.join(project,'work/curve_editor/sessions');await mkdir(saves,{recursive:true});
+ const saves=path.join(project,'work/curve_editor/test-sessions');await mkdir(saves,{recursive:true});
  await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
- server=spawn('python3',[serverScript,'--project',project,'--port','auto']);
+ server=spawn('python3',[serverScript,'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const match=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});const page=await browser.newPage({viewport:{width:1440,height:1000}});
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(url);await expandPanels(page);await page.locator('#curve-list button').filter({hasText:'矩形'}).waitFor();
+ await page.goto(url);await expandPanels(page);await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'矩形'}).waitFor();
  async function clickPoint(x,y,options={}){const p=await page.locator('#viewport').evaluate((el,{x,y})=>{const p=new DOMPoint(x,y).matrixTransform(el.getScreenCTM());return {x:p.x,y:p.y};},{x,y});await page.mouse.click(p.x,p.y,options);}
  const saved=async()=>page.evaluate(()=>fetch('/api/latest').then(r=>r.json()));
  const save=async()=>{const response=page.waitForResponse(r=>r.url().endsWith('/api/save'));await page.locator('#save').click();assert.equal((await response).status(),200);return saved();};
@@ -84,18 +85,18 @@ test('mirror copies, measurement tools, contiguous ranges and save/restore work 
  // Define an arbitrary axis before selecting a curve, and keep the original.
  await page.locator('[data-tool="axis"]').click({timeout:2000});
  await clickPoint(500,100);await clickPoint(500,650);
- await page.locator('#curve-list button').filter({hasText:'矩形'}).click();
- await page.locator('#mirror-copy').click();
- assert.equal(await page.locator('#curve-list button').count(),3);
- await page.locator('#undo').click();assert.equal(await page.locator('#curve-list button').count(),2);
- await page.locator('#redo').click();assert.equal(await page.locator('#curve-list button').count(),3);
+ await page.locator('#layer-list .curve-select').filter({hasText:'矩形'}).click();
+ await page.locator('#mirror-link').uncheck();await page.locator('#mirror-copy').click();
+ assert.equal(await page.locator('#layer-list .curve-select').count(),3);
+ await page.locator('#undo').click();assert.equal(await page.locator('#layer-list .curve-select').count(),2);
+ await page.locator('#redo').click();assert.equal(await page.locator('#layer-list .curve-select').count(),3);
  let doc=await save();assert.deepEqual(doc.paths[0],square);assert.equal(doc.paths[2].name,'矩形 · 镜像');assert.notEqual(doc.paths[2].id,square.id);
  doc.paths[2].nodes.forEach((n,i)=>{assert.ok(Math.abs(n.x-(1000-square.nodes[i].x))<1e-6);assert.equal(n.mode,square.nodes[i].mode);});
- assert.ok(doc.mirrorAxis);await page.reload();await page.locator('#curve-list button').filter({hasText:'矩形 · 镜像'}).waitFor();
+ assert.ok(doc.mirrorAxis);await page.reload();await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'矩形 · 镜像'}).waitFor();
  assert.match(await page.locator('#axis-info').textContent(),/已设置/);
 
  // Measurement keyboard input must not nudge a previously selected artwork node.
- await page.locator('#curve-list button').filter({hasText:'弧线'}).click();await clickPoint(500,200);
+ await page.locator('#layer-list .curve-select').filter({hasText:'弧线'}).click();await clickPoint(500,200);
  await page.locator('[data-tool="measure"]').click();await page.keyboard.press('ArrowRight');
  doc=await save();assert.deepEqual(doc.paths[1],arc);
 
@@ -120,9 +121,6 @@ test('mirror copies, measurement tools, contiguous ranges and save/restore work 
  await page.getByRole('menuitem',{name:'测量已选线段'}).click();assert.equal(await total(),500);
  doc=await save();assert.deepEqual(doc.paths[0],square);assert.deepEqual(doc.paths[1],arc);
  assert.equal(doc.paths.length,3);assert.equal(doc.measurement,undefined);
- const downloadPromise=page.waitForEvent('download');await page.locator('#export').click();
- const exported=await (await downloadPromise).createReadStream();let svg='';for await(const chunk of exported)svg+=chunk;
- assert.equal((svg.match(/<path /g)||[]).length,3);assert.ok(!svg.includes('对称轴'));assert.ok(!svg.includes('<line '));
  // Calibrate 100 image pixels as 10 cm; all existing measurements convert immediately.
  await page.locator('#calibrate').click({timeout:2000});await clickPoint(100,100);await clickPoint(200,100);
  await page.locator('#calibration-length').fill('0');await page.locator('#calibration-apply').click();
@@ -135,8 +133,12 @@ test('mirror copies, measurement tools, contiguous ranges and save/restore work 
  // Starting/canceling replacement calibration retains the active scale.
  await page.locator('#calibrate').click();await clickPoint(120,120);await page.keyboard.press('Escape');assert.equal(await total(),50);
  doc=await save();assert.equal(doc.calibration.length,10);assert.equal(doc.calibration.unit,'cm');assert.equal(doc.measureUnit,'cm');
+ const downloadPromise=page.waitForEvent('download');await page.locator('#export').click();await page.locator('#vector-export-format').selectOption('svg');await page.locator('#vector-export-confirm').click();
+ const exported=await (await downloadPromise).createReadStream();let svg='';for await(const chunk of exported)svg+=chunk;
+ assert.equal((svg.match(/<path /g)||[]).length,3);assert.ok(!svg.includes('对称轴'));assert.ok(!svg.includes('<line '));
+
  assert.deepEqual(doc.paths[0],square);assert.deepEqual(doc.paths[1],arc);
- await page.reload();await page.locator('#curve-list button').filter({hasText:'弧线'}).waitFor();
+ await page.reload();await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'弧线'}).waitFor();
  assert.match(await page.locator('#calibration-info').textContent(),/已标定/);
  await clickPoint(550,275,{button:'right'});await page.getByRole('menuitem',{name:'测量整条曲线'}).click();assert.equal(await total(),20);
  await page.locator('#zoom-in').click();assert.equal(await total(),20);await page.locator('#fit').click();
@@ -160,13 +162,13 @@ test('history buttons and shortcuts restore multiple edits, group gestures and p
  const curve={id:'history-curve',name:'历史曲线',color:'#e04544',role:'outline',note:'',closed:false,nodes:[g.node(200,400),g.node(450,200),g.node(700,400)]};
  curve.nodes[0].out={x:300,y:400};curve.nodes[1].in={x:350,y:200};curve.nodes[1].out={x:550,y:200};curve.nodes[2].in={x:600,y:400};
  const initial={format:'daban-curve-editor',version:1,units:'image-px',width:1000,height:700,title:'历史测试',paths:[curve],originals:[],image:null,opacity:.65,newNodeMode:'cusp'};
- const saves=path.join(project,'work/curve_editor/sessions');await mkdir(saves,{recursive:true});
+ const saves=path.join(project,'work/curve_editor/test-sessions');await mkdir(saves,{recursive:true});
  await writeFile(path.join(saves,'fixture.json'),JSON.stringify(initial));await writeFile(path.join(saves,'latest.txt'),'fixture.json');
- server=spawn('python3',[serverScript,'--project',project,'--port','auto']);
+ server=spawn('python3',[serverScript,'--project',project,'--port','0','--shared','default'],{env:{...process.env,CURVE_EDITOR_EDITION:'test',CURVE_EDITOR_REGISTRY:path.join(project,'registry'),CURVE_EDITOR_SCAN_PORTS:''}});
  const url=await new Promise((resolve,reject)=>{let log='';const timer=setTimeout(()=>reject(new Error(log||'server timeout')),10000);server.stdout.on('data',s=>{log+=s;const match=log.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timer);resolve(match[0]);}});server.once('error',reject);});
  browser=await chromium.launch({headless:true,...(process.env.CURVE_EDITOR_BROWSER_CHANNEL?{channel:process.env.CURVE_EDITOR_BROWSER_CHANNEL}:{})});
  const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- page.on('dialog',dialog=>dialog.accept());await page.goto(url);await expandPanels(page);await page.locator('#curve-list button').filter({hasText:'历史曲线'}).waitFor();
+ page.on('dialog',dialog=>dialog.accept());await page.goto(url);await expandPanels(page);await page.locator('.layer-row').waitFor();await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'历史曲线'}).waitFor();
  const undo=page.locator('#undo'),redo=page.locator('#redo');
  const screen=async(x,y)=>page.locator('#viewport').evaluate((el,{x,y})=>{const p=new DOMPoint(x,y).matrixTransform(el.getScreenCTM());return {x:p.x,y:p.y};},{x,y});
  const click=async(x,y)=>{const p=await screen(x,y);await page.mouse.click(p.x,p.y);};
@@ -193,7 +195,7 @@ test('history buttons and shortcuts restore multiple edits, group gestures and p
  await page.keyboard.press('Control+Shift+z');await counts(4,0);
  await page.keyboard.press('Meta+z');await counts(3,1);
  await page.keyboard.press('Control+y');await counts(4,0);
- await undo.click();await page.locator('#curve-list button').click();await click(260,450);
+ await undo.click();await page.locator('#layer-list .curve-select').click();await click(260,450);
  await page.keyboard.press('ArrowRight');await counts(4,0);assert.equal(await redo.isDisabled(),true);
 
  // Continuous typing is one edit, and range changes are one edit until change/blur.
@@ -212,7 +214,7 @@ test('history buttons and shortcuts restore multiple edits, group gestures and p
  // Clicking the SVG prevents the browser's normal blur; edits on different curves must stay separate.
  const second=JSON.parse(JSON.stringify(curve));second.id='second';second.name='第二条';second.nodes.forEach(n=>g.move(n,0,150));
  await page.locator('#project-file').setInputFiles({name:'two-curves.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify({...initial,paths:[curve,second]}))});
- await page.locator('#curve-list button').filter({hasText:'第二条'}).waitFor();
+ await expandLayerContents(page);await page.locator('#layer-list .curve-select').filter({hasText:'第二条'}).waitFor();
  await page.locator('#path-name').fill('first renamed');await click(200,550);
  assert.equal(await page.locator('#path-name').inputValue(),'第二条');
  await page.locator('#path-name').fill('second renamed');await undo.click();
